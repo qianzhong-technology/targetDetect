@@ -1,4 +1,4 @@
-# targetDetect 项目技术文档
+# targetDetect 技术文档
 
 ## 目录
 
