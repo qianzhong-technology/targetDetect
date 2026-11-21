@@ -7,6 +7,8 @@ import cv2
 import numpy as np
 
 from common.config import (
+    TARGET_ACCEL_USE_CPP_LK,
+    TARGET_ACCEL_USE_CPP_PERSPECTIVE,
     CORNER_TRACK_MAX_FEATURES,
     CORNER_TRACK_MAX_FRAMES,
     CORNER_TRACK_MIN_FEATURES,
@@ -29,6 +31,9 @@ from common.config import (
     TRACKING_ROI_MIN_HEIGHT,
     TRACKING_ROI_MIN_WIDTH,
 )
+from vision.native_backend import get_native_backend
+
+_NATIVE_BACKEND = get_native_backend()
 
 LK_FLOW_OPTIONS = {
     "winSize": (11, 11),
@@ -437,95 +442,133 @@ class TargetCornerTracker:
             self.clear()
             return None
 
-        next_points, forward_status, _ = cv2.calcOpticalFlowPyrLK(
-            previous_gray,
-            gray,
-            previous_points,
-            np.empty_like(previous_points),
-            **LK_FLOW_OPTIONS
+        current_corners = None
+        tracked_points = None
+        use_native_lk = (
+            TARGET_ACCEL_USE_CPP_LK
+            and _NATIVE_BACKEND.is_available
         )
 
-        if next_points is None or forward_status is None:
-            return self._tracking_failed()
-
-        current = next_points.reshape(-1, 2)
-        forward_ok = forward_status.reshape(-1) != 0
-        valid = (
-            forward_ok
-            & np.isfinite(current).all(axis=1)
-        )
-
-        previous_valid = previous_points.reshape(-1, 2)[valid]
-        current_valid = current[valid]
-        if len(previous_valid) < CORNER_TRACK_MIN_FEATURES:
-            return self._tracking_failed()
-
-        homography, inlier_mask = cv2.findHomography(
-            previous_valid,
-            current_valid,
-            cv2.RANSAC,
-            3.0
-        )
-        if homography is None or inlier_mask is None:
-            return self._tracking_failed()
-
-        inliers = inlier_mask.reshape(-1) != 0
-        inlier_count = int(np.count_nonzero(inliers))
-        if (
-            inlier_count < CORNER_TRACK_MIN_FEATURES
-            or inlier_count / len(previous_valid) < 0.75
-        ):
-            return self._tracking_failed()
-
-        previous_corners = corners.reshape(-1, 1, 2)
-        previous_area = abs(cv2.contourArea(previous_corners))
-        inlier_hull = cv2.convexHull(
-            previous_valid[inliers].astype(np.float32).reshape(-1, 1, 2)
-        )
-        support_ratio = (
-            cv2.contourArea(inlier_hull) / previous_area
-            if previous_area > 0
-            else 0.0
-        )
-        if support_ratio < 0.01:
-            return self._tracking_failed()
-
-        current_corners = cv2.perspectiveTransform(
-            previous_corners,
-            homography
-        ).reshape(-1, 2)
-        if (
-            not np.isfinite(current_corners).all()
-            or not cv2.isContourConvex(
-                current_corners.astype(np.float32).reshape(-1, 1, 2)
+        if use_native_lk:
+            native_result = _NATIVE_BACKEND.lk_track_corners(
+                previous_gray=previous_gray,
+                gray=gray,
+                previous_points=previous_points,
+                corners=corners,
+                min_features=CORNER_TRACK_MIN_FEATURES,
+                min_inlier_ratio=0.75,
+                support_min_ratio=0.01,
+                area_min_ratio=CORNER_TRACK_AREA_MIN_RATIO,
+                area_max_ratio=CORNER_TRACK_AREA_MAX_RATIO
             )
-        ):
-            return self._tracking_failed()
+            if native_result is None:
+                return self._tracking_failed()
 
-        current_area = abs(cv2.contourArea(
-            current_corners.astype(np.float32).reshape(-1, 1, 2)
-        ))
-        area_ratio = current_area / previous_area if previous_area > 0 else 0.0
-        if not (
-            CORNER_TRACK_AREA_MIN_RATIO
-            <= area_ratio
-            <= CORNER_TRACK_AREA_MAX_RATIO
-        ):
-            return self._tracking_failed()
+            current_corners = native_result["corners"]
+            tracked_points = native_result["tracked_points"]
+            max_corner_shift = native_result["max_shift"]
 
-        diagonal = max(
-            np.linalg.norm(corners[0] - corners[2]),
-            np.linalg.norm(corners[1] - corners[3])
-        )
-        corner_shift = np.linalg.norm(
-            current_corners - corners,
-            axis=1
-        )
-        if np.max(corner_shift) > max(
-            CORNER_TRACK_MAX_SHIFT * CORNER_TRACK_SCALE,
-            diagonal * 0.35
-        ):
-            return self._tracking_failed()
+            diagonal = max(
+                np.linalg.norm(corners[0] - corners[2]),
+                np.linalg.norm(corners[1] - corners[3])
+            )
+            if max_corner_shift > max(
+                CORNER_TRACK_MAX_SHIFT * CORNER_TRACK_SCALE,
+                diagonal * 0.35
+            ):
+                return self._tracking_failed()
+        else:
+            next_points, forward_status, _ = cv2.calcOpticalFlowPyrLK(
+                previous_gray,
+                gray,
+                previous_points,
+                np.empty_like(previous_points),
+                **LK_FLOW_OPTIONS
+            )
+
+            if next_points is None or forward_status is None:
+                return self._tracking_failed()
+
+            current = next_points.reshape(-1, 2)
+            forward_ok = forward_status.reshape(-1) != 0
+            valid = (
+                forward_ok
+                & np.isfinite(current).all(axis=1)
+            )
+
+            previous_valid = previous_points.reshape(-1, 2)[valid]
+            current_valid = current[valid]
+            if len(previous_valid) < CORNER_TRACK_MIN_FEATURES:
+                return self._tracking_failed()
+
+            homography, inlier_mask = cv2.findHomography(
+                previous_valid,
+                current_valid,
+                cv2.RANSAC,
+                3.0
+            )
+            if homography is None or inlier_mask is None:
+                return self._tracking_failed()
+
+            inliers = inlier_mask.reshape(-1) != 0
+            inlier_count = int(np.count_nonzero(inliers))
+            if (
+                inlier_count < CORNER_TRACK_MIN_FEATURES
+                or inlier_count / len(previous_valid) < 0.75
+            ):
+                return self._tracking_failed()
+
+            previous_corners = corners.reshape(-1, 1, 2)
+            previous_area = abs(cv2.contourArea(previous_corners))
+            inlier_hull = cv2.convexHull(
+                previous_valid[inliers].astype(np.float32).reshape(-1, 1, 2)
+            )
+            support_ratio = (
+                cv2.contourArea(inlier_hull) / previous_area
+                if previous_area > 0
+                else 0.0
+            )
+            if support_ratio < 0.01:
+                return self._tracking_failed()
+
+            current_corners = cv2.perspectiveTransform(
+                previous_corners,
+                homography
+            ).reshape(-1, 2)
+            if (
+                not np.isfinite(current_corners).all()
+                or not cv2.isContourConvex(
+                    current_corners.astype(np.float32).reshape(-1, 1, 2)
+                )
+            ):
+                return self._tracking_failed()
+
+            current_area = abs(cv2.contourArea(
+                current_corners.astype(np.float32).reshape(-1, 1, 2)
+            ))
+            area_ratio = current_area / previous_area if previous_area > 0 else 0.0
+            if not (
+                CORNER_TRACK_AREA_MIN_RATIO
+                <= area_ratio
+                <= CORNER_TRACK_AREA_MAX_RATIO
+            ):
+                return self._tracking_failed()
+
+            diagonal = max(
+                np.linalg.norm(corners[0] - corners[2]),
+                np.linalg.norm(corners[1] - corners[3])
+            )
+            corner_shift = np.linalg.norm(
+                current_corners - corners,
+                axis=1
+            )
+            if np.max(corner_shift) > max(
+                CORNER_TRACK_MAX_SHIFT * CORNER_TRACK_SCALE,
+                diagonal * 0.35
+            ):
+                return self._tracking_failed()
+
+            tracked_points = current_valid[inliers].reshape(-1, 1, 2)
 
         current_delta = current_corners - corners
         if self.corner_velocity is None:
@@ -540,7 +583,6 @@ class TargetCornerTracker:
             + (1.0 - CORNER_TRACK_SMOOTH_ALPHA) * corners
         ).astype(np.float32)
 
-        tracked_points = current_valid[inliers].reshape(-1, 1, 2)
         if len(tracked_points) < CORNER_TRACK_REFRESH_FEATURES:
             refreshed_points = self._find_features(gray, current_corners)
             if (
@@ -607,6 +649,18 @@ def make_homography(corners):
         左上、右上、右下、左下
     """
 
+    if (
+        TARGET_ACCEL_USE_CPP_PERSPECTIVE
+        and _NATIVE_BACKEND.is_available
+    ):
+        homography = _NATIVE_BACKEND.make_homography(
+            corners,
+            RECT_WIDTH,
+            RECT_HEIGHT
+        )
+        if homography is not None:
+            return homography
+
     top_edge = np.linalg.norm(corners[1] - corners[0])
     right_edge = np.linalg.norm(corners[2] - corners[1])
 
@@ -634,6 +688,18 @@ def make_homography(corners):
 
 
 def rectify_image(frame, H):
+    if (
+        TARGET_ACCEL_USE_CPP_PERSPECTIVE
+        and _NATIVE_BACKEND.is_available
+    ):
+        rectified = _NATIVE_BACKEND.warp_perspective(
+            frame,
+            H,
+            RECT_WIDTH,
+            RECT_HEIGHT
+        )
+        if rectified is not None:
+            return rectified
 
     rectified = cv2.warpPerspective(
         frame,
@@ -649,6 +715,17 @@ def rectified_to_camera(center, H):
 
     if center is None:
         return None
+
+    if (
+        TARGET_ACCEL_USE_CPP_PERSPECTIVE
+        and _NATIVE_BACKEND.is_available
+    ):
+        original = _NATIVE_BACKEND.inverse_project_point(
+            center,
+            H
+        )
+        if original is not None:
+            return original
 
     # 求逆矩阵
     H_inv = np.linalg.inv(H)

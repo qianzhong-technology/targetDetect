@@ -1,0 +1,10 @@
+id: targetdetect-accel
+name: targetdetect_accel
+version: 1.0.0
+author: qianzhong-technology
+desc: Build libtargetdetect_accel.so for targetDetect vision pipeline
+files:
+  - main/src/main.cpp
+  - main/CMakeLists.txt
+  - components/targetdetect_accel/CMakeLists.txt
+  - components/targetdetect_accel/src/targetdetect_accel.cpp
