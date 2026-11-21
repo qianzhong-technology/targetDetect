@@ -8,28 +8,28 @@
 - [4. 主流程说明](#4-主流程说明)
 - [5. 模块说明](#5-模块说明)
   - [5.1 `main.py`](#51-mainpy)
-  - [5.2 `config.py`](#52-configpy)
+  - [5.2 `common/config.py`](#52-commonconfigpy)
     - [摄像头与校正图](#摄像头与校正图)
     - [靶纸检测参数](#靶纸检测)
     - [红环检测参数](#红环检测)
     - [角点跟踪参数](#角点跟踪)
-  - [5.3 `lighting.py`](#53-lightingpy)
-  - [5.4 `target_frame.py`](#54-target_framepy)
+  - [5.3 `vision/lighting.py`](#53-visionlightingpy)
+  - [5.4 `vision/target_frame.py`](#54-visiontarget_framepy)
     - [角点排序](#角点排序)
     - [靶纸框重检](#靶纸框重检)
     - [角点光流跟踪](#角点光流跟踪)
     - [透视变换](#透视变换)
     - [跟踪 ROI](#跟踪-roi)
-  - [5.5 `target_center.py`](#55-target_centerpy)
+  - [5.5 `vision/target_center.py`](#55-visiontarget_centerpy)
     - [红色掩膜提取](#红色掩膜提取)
     - [中心拟合](#中心拟合)
     - [下采样](#下采样)
-  - [5.6 `kalman.py`](#56-kalmanpy)
-  - [5.7 `serial_sender.py`](#57-serial_senderpy)
+  - [5.6 `vision/kalman.py`](#56-visionkalmanpy)
+  - [5.7 `control/serial_sender.py`](#57-controlserial_senderpy)
   - [5.8 屏幕数据展示](#58-屏幕数据展示)
-  - [5.9 `gimbal_pid.py`](#59-gimbal_pidpy)
+  - [5.9 `control/gimbal_pid.py`](#59-controlgimbal_pidpy)
     - [IMU 姿态反馈](#imu-姿态反馈)
-  - [5.10 `camera_attitude.py`](#510-camera_attitudepy)
+  - [5.10 `control/camera_attitude.py`](#510-controlcamera_attitudepy)
 - [6. 坐标系统](#6-坐标系统)
 - [7. 状态机](#7-状态机)
   - [靶纸框状态](#靶纸框状态)
@@ -64,6 +64,12 @@
 项目运行在 MaixCAM Pro 上，使用摄像头读取图像、OpenCV 检测靶纸和靶心、LK 光流跟踪靶纸角点，并将结果叠加到屏幕。
 
 ## 2. 项目结构
+
+源码按功能分为三个包（每个包含 `__init__.py`）：
+
+- `common/`：公共配置与日志输出
+- `vision/`：图像处理与目标检测（补光、靶纸框、靶心、卡尔曼预测）
+- `control/`：控制与通信（串口发送、云台 PID、相机姿态）
 
 | 文件 | 主要职责 |
 |---|---|
@@ -136,7 +142,7 @@
 
 通常不应在此文件中添加算法逻辑。
 
-### 5.2 `config.py`
+### 5.2 `common/config.py`
 
 这是全局参数中心。常用参数分为以下几类。
 
@@ -191,7 +197,7 @@
 | `CORNER_TRACK_REJECTED_FRAMES` | 2 | 异常候选连续出现多少次后才接受 |
 | `CORNER_TRACK_SMOOTH_ALPHA` | 0.85 | 正常重检候选的新位置权重 |
 
-### 5.3 `lighting.py`
+### 5.3 `vision/lighting.py`
 
 `update_fill_light()` 计算画面中心区域的亮度：
 
@@ -205,7 +211,7 @@
 
 补光不关闭的设计是为了避免亮度跨阈值时灯光高频开关。
 
-### 5.4 `target_frame.py`
+### 5.4 `vision/target_frame.py`
 
 该模块负责靶纸几何定位。
 
@@ -269,7 +275,7 @@
 
 正常情况下应优先在 ROI 内重检靶框，以减少计算量。
 
-### 5.5 `target_center.py`
+### 5.5 `vision/target_center.py`
 
 该模块负责靶心定位。完整流程分为快速分割、快速拟合、兜底拟合和暗红候选四部分。
 
@@ -319,7 +325,7 @@ red_excess = red - max(green, blue)
 
 该设计降低 CPU 负担，但会使低分辨率轮廓边缘略微影响拟合精度。
 
-### 5.6 `kalman.py`
+### 5.6 `vision/kalman.py`
 
 当前实现是二维常速度状态：
 
@@ -345,7 +351,7 @@ red_excess = red - max(green, blue)
 - 靶纸移出画面时显示未找到，而不是继续预测；
 - 防止异常跳变污染速度。
 
-### 5.7 `serial_sender.py`
+### 5.7 `control/serial_sender.py`
 
 该模块负责实时串口遥测，不参与图像算法和屏幕绘制。
 
@@ -397,7 +403,7 @@ red_excess = red - max(green, blue)
 - `LIGHT ON/OFF`：补光灯状态。
 - `FPS`：实际主循环帧率。
 
-### 5.9 `gimbal_pid.py`
+### 5.9 `control/gimbal_pid.py`
 
 该模块负责二轴舵机云台的闭环姿态计算，不包含 PWM、舵机脉宽或硬件总线代码。云台控制只使用高置信的 `TARGET LOCKED` 靶心坐标；`LOW CONF`、`PREDICTING` 和 `TARGET NOT FOUND` 不参与云台跟踪。
 
@@ -437,7 +443,7 @@ red_excess = red - max(green, blue)
 | `GIMBAL_TILT_DIRECTION=1` | 俯仰舵机角度增大时云台向下转 |
 | `GIMBAL_TILT_DIRECTION=-1` | 俯仰舵机角度增大时云台向上转 |
 
-主要参数位于 `config.py`：画面中心、水平和俯仰的 Kp/Ki/Kd、像素死区、角度积分及输出限幅、微分滤波系数、舵机角度范围和打印间隔。
+主要参数位于 `common/config.py`：画面中心、水平和俯仰的 Kp/Ki/Kd、像素死区、角度积分及输出限幅、微分滤波系数、舵机角度范围和打印间隔。
 
 #### IMU 姿态反馈
 
@@ -465,7 +471,7 @@ red_excess = red - max(green, blue)
 当板载 IMU 初始化或读取失败时，控制器只保留视觉外环，不会停止视觉跟踪，也不会循环报错。
 相机姿态模块只在 MaixCAM-Pro 固件环境中直接导入官方的 `maix.ahrs` 和 `maix.ext_dev.imu`，不再尝试兼容旧路径或其他 Maix 设备。
 
-### 5.10 `camera_attitude.py`
+### 5.10 `control/camera_attitude.py`
 
 该模块封装 MaixCAM-Pro 的板载姿态读取：
 
@@ -666,6 +672,9 @@ red_excess = red - max(green, blue)
 - `control/gimbal_pid.py`
 - `control/camera_attitude.py`
 - `common/console_output.py`
+- `common/__init__.py`
+- `vision/__init__.py`
+- `control/__init__.py`
 
 应用入口由 `main.py` 启动。
 
@@ -822,13 +831,13 @@ GPIO：GPIOB3
 
 建议按以下顺序阅读和理解代码：
 
-1. 阅读 `config.py`，建立分辨率、半径、阈值和跟踪参数的整体印象。
+1. 阅读 `common/config.py`，建立分辨率、半径、阈值和跟踪参数的整体印象。
 2. 阅读 `main.py` 和 `app.py`，理解主循环执行顺序。
-3. 阅读 `target_frame.py`，理解靶纸框和四角跟踪。
-4. 阅读 `target_center.py`，理解靶心提取和置信度。
-5. 阅读 `kalman.py`，理解丢失帧预测。
-6. 阅读 `lighting.py`，理解补光状态。
-7. 阅读 `gimbal_pid.py`，理解水平、俯仰误差和 PID 输出。
+3. 阅读 `vision/target_frame.py`，理解靶纸框和四角跟踪。
+4. 阅读 `vision/target_center.py`，理解靶心提取和置信度。
+5. 阅读 `vision/kalman.py`，理解丢失帧预测。
+6. 阅读 `vision/lighting.py`，理解补光状态。
+7. 阅读 `control/gimbal_pid.py`，理解水平、俯仰误差和 PID 输出。
 8. 修改前先运行静止画面、轻微晃动、快速晃动和目标遮挡四类场景。
 9. 观察每秒一次的 `timing` 日志，定位速度瓶颈。
 
