@@ -6,7 +6,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from config import (
+from common.config import (
     CORNER_TRACK_MAX_FEATURES,
     CORNER_TRACK_MAX_FRAMES,
     CORNER_TRACK_MIN_FEATURES,
