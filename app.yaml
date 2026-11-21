@@ -1,0 +1,18 @@
+id: targetdetect
+name: 靶心解算
+version: 1.0.0
+author: du
+icon: app.png
+desc: 靶心解算
+files:
+  - app.py
+  - camera_attitude.py
+  - config.py
+  - console_output.py
+  - gimbal_pid.py
+  - kalman.py
+  - lighting.py
+  - main.py
+  - serial_sender.py
+  - target_center.py
+  - target_frame.py
