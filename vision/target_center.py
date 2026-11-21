@@ -31,7 +31,9 @@ CANDIDATE_SCORE_MAX_POINTS = 16
 
 
 def extract_red_mask(rectified):
-    blue, green, red = cv2.split(rectified)
+    blue = rectified[:, :, 0]
+    green = rectified[:, :, 1]
+    red = rectified[:, :, 2]
     red_reference = cv2.max(green, blue)
     red_excess = cv2.subtract(red, red_reference)
     _, base_mask = cv2.threshold(

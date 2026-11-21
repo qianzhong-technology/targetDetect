@@ -30,6 +30,16 @@ from common.config import (
     TRACKING_ROI_MIN_WIDTH,
 )
 
+LK_FLOW_OPTIONS = {
+    "winSize": (11, 11),
+    "maxLevel": 2,
+    "criteria": (
+        cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+        15,
+        0.03
+    )
+}
+
 
 def order_points(pts):
     """
@@ -386,7 +396,7 @@ class TargetCornerTracker:
         self.predicted_corners = self.corners.copy()
         self.corner_velocity = np.zeros((4, 2), dtype=np.float32)
         self.predicted_frames = 0
-        self.previous_gray = gray.copy()
+        self.previous_gray = gray
         self.previous_points = self._find_features(
             gray,
             self.corners
@@ -427,21 +437,12 @@ class TargetCornerTracker:
             self.clear()
             return None
 
-        flow_options = {
-            "winSize": (11, 11),
-            "maxLevel": 2,
-            "criteria": (
-                cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
-                15,
-                0.03
-            )
-        }
         next_points, forward_status, _ = cv2.calcOpticalFlowPyrLK(
             previous_gray,
             gray,
             previous_points,
             np.empty_like(previous_points),
-            **flow_options
+            **LK_FLOW_OPTIONS
         )
 
         if next_points is None or forward_status is None:
@@ -548,8 +549,11 @@ class TargetCornerTracker:
             ):
                 tracked_points = refreshed_points
 
-        self.previous_gray = gray.copy()
-        self.previous_points = tracked_points.astype(np.float32)
+        self.previous_gray = gray
+        self.previous_points = tracked_points.astype(
+            np.float32,
+            copy=False
+        )
         self.corners = current_corners.astype(np.float32)
         self.predicted_corners = self.corners.copy()
         self.predicted_frames = 0
