@@ -2,7 +2,7 @@
 
 import cv2
 
-from config import (
+from common.config import (
     FILL_LIGHT_ON_THRESHOLD,
 )
 

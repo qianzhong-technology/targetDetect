@@ -8,7 +8,7 @@ from typing import Any, Callable, Optional
 from maix import ahrs
 from maix.ext_dev import imu  # pyright: ignore[reportMissingImports]
 
-from console_output import print_status
+from common.console_output import print_status
 
 
 def _shortest_angle_delta(current_deg: float, reference_deg: float) -> float:

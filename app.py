@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from maix import app, camera, display, err, gpio, image, pinmap
 
-from config import (
+from common.config import (
     CAMERA_FPS,
     CAMERA_HEIGHT,
     CAMERA_WIDTH,
@@ -55,14 +55,14 @@ from config import (
     UART_SEND_INTERVAL,
 )
 
-from camera_attitude import CameraAttitude
-from console_output import print_status
-from gimbal_pid import TwoAxisGimbalPID
-from kalman import TargetKalman
-from lighting import update_fill_light
-from target_center import detect_target_center
-from serial_sender import TargetSerialSender
-from target_frame import (
+from control.camera_attitude import CameraAttitude
+from common.console_output import print_status
+from control.gimbal_pid import TwoAxisGimbalPID
+from vision.kalman import TargetKalman
+from vision.lighting import update_fill_light
+from vision.target_center import detect_target_center
+from control.serial_sender import TargetSerialSender
+from vision.target_frame import (
     TargetCornerTracker,
     detect_target_corners,
     get_tracking_roi,

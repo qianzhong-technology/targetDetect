@@ -5,9 +5,9 @@ import time
 
 from maix import err, pinmap, uart
 
-from console_output import print_status
+from common.console_output import print_status
 
-from config import (
+from common.config import (
     UART_BAUDRATE,
     UART_HEARTBEAT_INTERVAL,
     UART_PORT,

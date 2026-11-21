@@ -6,13 +6,16 @@ icon: app.png
 desc: 靶心解算
 files:
   - app.py
-  - camera_attitude.py
-  - config.py
-  - console_output.py
-  - gimbal_pid.py
-  - kalman.py
-  - lighting.py
+  - control/camera_attitude.py
+  - common/config.py
+  - common/console_output.py
+  - control/gimbal_pid.py
+  - vision/kalman.py
+  - vision/lighting.py
   - main.py
-  - serial_sender.py
-  - target_center.py
-  - target_frame.py
+  - control/serial_sender.py
+  - vision/target_center.py
+  - vision/target_frame.py
+  - common/__init__.py
+  - vision/__init__.py
+  - control/__init__.py

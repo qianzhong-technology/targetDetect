@@ -6,7 +6,7 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
-from config import (
+from common.config import (
     CENTER_PRIOR_WEIGHT,
     CHECK_RING_RADIUS,
     CENTER_DETECT_SCALE,

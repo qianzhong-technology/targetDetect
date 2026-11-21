@@ -4,7 +4,7 @@ import math
 import time
 from typing import Optional, Tuple
 
-from console_output import print_status
+from common.console_output import print_status
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:

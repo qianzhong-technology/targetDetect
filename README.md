@@ -69,15 +69,15 @@
 |---|---|
 | `main.py` | Python 程序入口，调用 `app.main()` |
 | `app.py` | 主循环、模块调度、状态展示、相机和屏幕 I/O、耗时统计 |
-| `config.py` | 摄像头、几何、颜色、跟踪、置信度及补光参数 |
-| `lighting.py` | 根据画面亮度控制补光灯 |
-| `target_frame.py` | 靶纸框检测、角点排序、四角光流跟踪、透视变换和跟踪 ROI |
-| `target_center.py` | 红色同心环提取、靶心拟合和置信度判断 |
-| `kalman.py` | 目标丢失或低置信时的短时速度预测 |
-| `serial_sender.py` | 串口初始化、结构化靶子数据和传输异常处理 |
-| `gimbal_pid.py` | 二轴云台闭环 PID、积分限幅、输出限幅及转动方向打印 |
-| `camera_attitude.py` | MaixCAM-Pro QMI8658 姿态读取、陀螺仪校准和 AHRS 欧拉角反馈 |
-| `console_output.py` | 统一控制台状态日志格式 |
+| `common/config.py` | 摄像头、几何、颜色、跟踪、置信度及补光参数 |
+| `vision/lighting.py` | 根据画面亮度控制补光灯 |
+| `vision/target_frame.py` | 靶纸框检测、角点排序、四角光流跟踪、透视变换和跟踪 ROI |
+| `vision/target_center.py` | 红色同心环提取、靶心拟合和置信度判断 |
+| `vision/kalman.py` | 目标丢失或低置信时的短时速度预测 |
+| `control/serial_sender.py` | 串口初始化、结构化靶子数据和传输异常处理 |
+| `control/gimbal_pid.py` | 二轴云台闭环 PID、积分限幅、输出限幅及转动方向打印 |
+| `control/camera_attitude.py` | MaixCAM-Pro QMI8658 姿态读取、陀螺仪校准和 AHRS 欧拉角反馈 |
+| `common/console_output.py` | 统一控制台状态日志格式 |
 | `app.yaml` | MaixApp 应用元数据及打包文件清单 |
 | `app.png` | MaixApp 应用图标 |
 
@@ -657,15 +657,15 @@ red_excess = red - max(green, blue)
 
 - `main.py`
 - `app.py`
-- `config.py`
-- `lighting.py`
-- `target_frame.py`
-- `target_center.py`
-- `kalman.py`
-- `serial_sender.py`
-- `gimbal_pid.py`
-- `camera_attitude.py`
-- `console_output.py`
+- `common/config.py`
+- `vision/lighting.py`
+- `vision/target_frame.py`
+- `vision/target_center.py`
+- `vision/kalman.py`
+- `control/serial_sender.py`
+- `control/gimbal_pid.py`
+- `control/camera_attitude.py`
+- `common/console_output.py`
 
 应用入口由 `main.py` 启动。
 
