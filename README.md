@@ -13,6 +13,7 @@
     - [靶纸检测参数](#靶纸检测)
     - [红环检测参数](#红环检测)
     - [角点跟踪参数](#角点跟踪)
+    - [原生加速后端](#原生加速后端)
   - [5.3 `vision/lighting.py`](#53-visionlightingpy)
   - [5.4 `vision/target_frame.py`](#54-visiontarget_framepy)
     - [角点排序](#角点排序)
@@ -79,11 +80,15 @@
 | `vision/lighting.py` | 根据画面亮度控制补光灯 |
 | `vision/target_frame.py` | 靶纸框检测、角点排序、四角光流跟踪、透视变换和跟踪 ROI |
 | `vision/target_center.py` | 红色同心环提取、靶心拟合和置信度判断 |
+| `vision/native_backend.py` | C++ 动态库加载与 LK/透视/圆环拟合桥接 |
 | `vision/kalman.py` | 目标丢失或低置信时的短时速度预测 |
 | `control/serial_sender.py` | 串口初始化、结构化靶子数据和传输异常处理 |
 | `control/gimbal_pid.py` | 二轴云台闭环 PID、积分限幅、输出限幅及转动方向打印 |
 | `control/camera_attitude.py` | MaixCAM-Pro QMI8658 姿态读取、陀螺仪校准和 AHRS 欧拉角反馈 |
 | `common/console_output.py` | 统一控制台状态日志格式 |
+| `vision/native/targetdetect_accel.cpp` | C++/NEON 加速实现（LK、透视、圆环拟合） |
+| `vision/native/build_with_maixcdk.sh` | MaixCDK 一键编译并同步 `.so`/`dl_lib` |
+| `vision/native/maixcdk_project/` | MaixCDK 编译工程（组件化） |
 | `app.yaml` | MaixApp 应用元数据及打包文件清单 |
 | `app.png` | MaixApp 应用图标 |
 
@@ -197,6 +202,18 @@
 | `CORNER_TRACK_REJECTED_FRAMES` | 2 | 异常候选连续出现多少次后才接受 |
 | `CORNER_TRACK_SMOOTH_ALPHA` | 0.85 | 正常重检候选的新位置权重 |
 
+#### 原生加速后端
+
+| 参数 | 默认值 | 含义 |
+|---|---|---|
+| `TARGET_ACCEL_BACKEND` | `auto` | `auto/python/npu` 三种模式 |
+| `TARGET_ACCEL_LIB_PATH` | `vision/native/libtargetdetect_accel.so` | 原生动态库路径 |
+| `TARGET_ACCEL_USE_CPP_LK` | `True` | 角点 LK + RANSAC + 投影是否走 C++ |
+| `TARGET_ACCEL_USE_CPP_PERSPECTIVE` | `True` | 透视矩阵、warp 和逆投影是否走 C++ |
+| `TARGET_ACCEL_USE_CPP_RING_FIT` | `True` | 圆环拟合是否走 C++ |
+
+`auto` 模式下优先加载 C++ 动态库并使用 NEON 分支（ARM 平台编译时启用）；加载失败会自动回退到原 Python 算法。`npu` 为流水线预留模式，当前会在无可用 NPU stage 时自动回退。
+
 ### 5.3 `vision/lighting.py`
 
 `update_fill_light()` 计算画面中心区域的亮度：
@@ -256,6 +273,8 @@
 
 外推最多 12 帧，避免角点在靶纸移出画面后永久漂移。
 
+当 `TARGET_ACCEL_USE_CPP_LK=True` 且原生库可用时，上述 LK/RANSAC/四角投影链路会由 `vision/native/targetdetect_accel.cpp` 执行，Python 仅保留状态管理与兜底。
+
 #### 透视变换
 
 `make_homography()` 根据相机四角生成校正到标准靶纸图的单应矩阵。
@@ -263,6 +282,8 @@
 `rectify_image()` 将图像变换到 `210x297`。
 
 `rectified_to_camera()` 对靶心坐标应用逆单应矩阵，投影回原始 `640x480` 摄像头坐标。
+
+当 `TARGET_ACCEL_USE_CPP_PERSPECTIVE=True` 且原生库可用时，`make_homography/rectify_image/rectified_to_camera` 由 C++ 实现执行。
 
 #### 跟踪 ROI
 
@@ -278,6 +299,8 @@
 ### 5.5 `vision/target_center.py`
 
 该模块负责靶心定位。完整流程分为快速分割、快速拟合、兜底拟合和暗红候选四部分。
+
+当 `TARGET_ACCEL_USE_CPP_RING_FIT=True` 且原生库可用时，轮廓筛选、联合圆拟合和 RMS 计算优先走 C++，失败时自动回退到 Python 兜底流程。
 
 #### 红色掩膜提取
 
@@ -667,6 +690,7 @@ red_excess = red - max(green, blue)
 - `vision/lighting.py`
 - `vision/target_frame.py`
 - `vision/target_center.py`
+- `vision/native_backend.py`
 - `vision/kalman.py`
 - `control/serial_sender.py`
 - `control/gimbal_pid.py`
@@ -675,8 +699,34 @@ red_excess = red - max(green, blue)
 - `common/__init__.py`
 - `vision/__init__.py`
 - `control/__init__.py`
+- `vision/native/targetdetect_accel.cpp`
+- `vision/native/build_with_maixcdk.sh`
+- `vision/native/maixcdk_project/app.yaml`
+- `vision/native/maixcdk_project/main/CMakeLists.txt`
+- `vision/native/maixcdk_project/main/src/main.cpp`
+- `vision/native/maixcdk_project/components/targetdetect_accel/CMakeLists.txt`
+- `vision/native/maixcdk_project/components/targetdetect_accel/src/targetdetect_accel.cpp`
 
 应用入口由 `main.py` 启动。
+
+### 原生加速库编译
+
+项目新增 `vision/native/targetdetect_accel.cpp`，用于将以下热点链路迁移到 C++：
+
+- LK 光流 + RANSAC 单应矩阵 + 四角投影
+- 透视矩阵、`warpPerspective`、逆透视回投影
+- 红环轮廓联合圆心拟合（含 NEON 优化分支）
+
+在设备或交叉编译环境中可使用 MaixCDK 构建脚本：
+
+```bash
+cd vision/native
+./build_with_maixcdk.sh
+```
+
+脚本内部使用 `maixcdk -p maixcam build`，适配 MaixCAM / MaixCAM Pro 平台。
+
+产物默认输出到 `vision/native/libtargetdetect_accel.so`，依赖库同步到 `vision/native/dl_lib/`。运行时可通过环境变量 `TARGETDETECT_NATIVE_LIB` 和 `TARGETDETECT_NATIVE_DL_LIB_DIR` 覆盖库与依赖目录。
 
 ### GPIO 与补光灯
 

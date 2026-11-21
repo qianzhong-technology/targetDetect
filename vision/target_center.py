@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from common.config import (
+    TARGET_ACCEL_USE_CPP_RING_FIT,
     CENTER_PRIOR_WEIGHT,
     CHECK_RING_RADIUS,
     CENTER_DETECT_SCALE,
@@ -26,6 +27,9 @@ from common.config import (
     RING_RADII_PX,
     RING_SEARCH_TOLERANCE,
 )
+from vision.native_backend import get_native_backend
+
+_NATIVE_BACKEND = get_native_backend()
 
 CANDIDATE_SCORE_MAX_POINTS = 16
 
@@ -508,6 +512,28 @@ def fit_target_center(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
     str
 ]:
     """优先根据轮廓拟合已知同心圆环，再根据需要进入像素兜底。"""
+    if (
+        TARGET_ACCEL_USE_CPP_RING_FIT
+        and _NATIVE_BACKEND.is_available
+    ):
+        native_result = _NATIVE_BACKEND.fit_target_center_mask(
+            mask=mask,
+            scale_x=scale_x,
+            scale_y=scale_y,
+            expected_radii_px=RING_RADII_PX,
+            search_tolerance=RING_SEARCH_TOLERANCE,
+            max_radius_error=MAX_RADIUS_ERROR,
+            check_ring_radius=CHECK_RING_RADIUS,
+            center_prior_weight=CENTER_PRIOR_WEIGHT,
+            fit_rms_warning_threshold=FIT_RMS_WARNING_THRESHOLD,
+            rect_width=RECT_WIDTH,
+            rect_height=RECT_HEIGHT
+        )
+        if native_result is not None:
+            center, rms, radii, fit_status = native_result
+            if center is not None:
+                return center, rms, radii, fit_status
+
     scale = (scale_x + scale_y) / 2.0
     contours, _ = cv2.findContours(
         mask.copy(),
