@@ -1,4 +1,8 @@
-# targetDetect 技术文档
+<p align="center">
+  <img src="app.png" width="144"/>
+</p>
+
+<h1 align="center">targetDetect 技术文档</h1>
 
 ## 目录
 
