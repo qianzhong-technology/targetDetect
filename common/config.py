@@ -99,11 +99,11 @@ CORNER_TRACK_REJECTED_FRAMES = 2
 # auto   -> 优先加载 C++/NEON 动态库，失败时回退 Python
 # python -> 强制使用 Python 实现
 # npu    -> 预留 NPU 流水线模式（当前若不可用会自动回退）
-TARGET_ACCEL_BACKEND = "auto"
+TARGET_ACCEL_BACKEND = "python"
 TARGET_ACCEL_LIB_PATH = "vision/native/libtargetdetect_accel.so"
-TARGET_ACCEL_USE_CPP_LK = True
-TARGET_ACCEL_USE_CPP_PERSPECTIVE = True
-TARGET_ACCEL_USE_CPP_RING_FIT = True
+TARGET_ACCEL_USE_CPP_LK = False
+TARGET_ACCEL_USE_CPP_PERSPECTIVE = False
+TARGET_ACCEL_USE_CPP_RING_FIT = False
 
 # 画面中心区域的亮度低于此值时开启补光。
 FILL_LIGHT_ON_THRESHOLD = 110.0
