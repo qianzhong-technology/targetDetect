@@ -1,9 +1,8 @@
 <p align="center">
-  <img src="app.png" width="144"/>
+  <img src="app.png" width="64"/>
 </p>
 
-<h1 align="center">targetDetect 技术文档</h1>
-
+# targetDetect 技术文档
 ## 目录
 
 - [1. 文档目的](#1-文档目的)
