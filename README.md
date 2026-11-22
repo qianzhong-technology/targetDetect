@@ -724,7 +724,21 @@ cd vision/native
 ./build_with_maixcdk.sh
 ```
 
-脚本内部使用 `maixcdk -p maixcam build`，适配 MaixCAM / MaixCAM Pro 平台。
+首次运行时，脚本会进入 `maixcdk menuconfig`；在配置界面选择 **MaixCAM** 平台并保存退出。
+
+完整重新配置或源码新增后使用：
+
+```bash
+./build_with_maixcdk.sh build
+```
+
+只修改已有源文件时可加快编译：
+
+```bash
+./build_with_maixcdk.sh build2
+```
+
+不要使用 `maixcdk -p maixcam build`；在当前 MaixCDK CLI 中，平台选择通过 `menuconfig` 保存，实际构建使用 `maixcdk build` 或 `maixcdk build2`。
 
 产物默认输出到 `vision/native/libtargetdetect_accel.so`，依赖库同步到 `vision/native/dl_lib/`。运行时可通过环境变量 `TARGETDETECT_NATIVE_LIB` 和 `TARGETDETECT_NATIVE_DL_LIB_DIR` 覆盖库与依赖目录。
 
