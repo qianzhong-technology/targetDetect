@@ -50,17 +50,19 @@ class TargetSerialSender:
         center_camera
     ):
         # 使用相机原始坐标发送：@x,y + CRLF
-        # 没有有限有效中心点时，不发送坐标。
+        # 靶心丢失时发送固定丢失帧。
         if center_camera is None:
-            return False
-
-        raw_x = float(center_camera[0])
-        raw_y = float(center_camera[1])
-        if not math.isfinite(raw_x) or not math.isfinite(raw_y):
-            return False
-
-        x = round(raw_x, 2)
-        y = round(raw_y, 2)
+            x = -1.0
+            y = -1.0
+        else:
+            raw_x = float(center_camera[0])
+            raw_y = float(center_camera[1])
+            if not math.isfinite(raw_x) or not math.isfinite(raw_y):
+                x = -1.0
+                y = -1.0
+            else:
+                x = round(raw_x, 2)
+                y = round(raw_y, 2)
 
         state = (x, y)
         now = time.monotonic()
