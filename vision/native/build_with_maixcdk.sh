@@ -17,11 +17,29 @@ if [ ! -d "${PROJECT_DIR}" ]; then
 fi
 
 pushd "${PROJECT_DIR}" >/dev/null
-maixcdk -p maixcam build
+
+if [ "${MAIXCDK_SKIP_MENUCONFIG:-0}" != "1" ] && [ ! -f ".config" ]; then
+  echo "No saved MaixCDK platform config found; opening menuconfig."
+  echo "Select the MaixCAM platform, save, and exit."
+  maixcdk menuconfig
+fi
+
+BUILD_MODE="${1:-build}"
+case "${BUILD_MODE}" in
+  build|build2)
+    maixcdk "${BUILD_MODE}"
+    ;;
+  *)
+    echo "error: unsupported build mode '${BUILD_MODE}'. Use 'build' or 'build2'." >&2
+    exit 1
+    ;;
+esac
 
 LIB_CANDIDATE="$(find build dist -type f -name 'libtargetdetect_accel.so' 2>/dev/null | head -n 1 || true)"
 if [ -z "${LIB_CANDIDATE}" ]; then
   echo "error: build finished but libtargetdetect_accel.so not found in build/ or dist/." >&2
+  echo "Available shared libraries:" >&2
+  find build dist -type f -name '*.so*' 2>/dev/null | sort >&2 || true
   exit 1
 fi
 

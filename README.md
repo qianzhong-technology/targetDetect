@@ -206,13 +206,13 @@
 
 | 参数 | 默认值 | 含义 |
 |---|---|---|
-| `TARGET_ACCEL_BACKEND` | `auto` | `auto/python/npu` 三种模式 |
+| `TARGET_ACCEL_BACKEND` | `python` | 联调默认使用 Python；可改为 `auto/npu` 启用原生加速 |
 | `TARGET_ACCEL_LIB_PATH` | `vision/native/libtargetdetect_accel.so` | 原生动态库路径 |
-| `TARGET_ACCEL_USE_CPP_LK` | `True` | 角点 LK + RANSAC + 投影是否走 C++ |
-| `TARGET_ACCEL_USE_CPP_PERSPECTIVE` | `True` | 透视矩阵、warp 和逆投影是否走 C++ |
-| `TARGET_ACCEL_USE_CPP_RING_FIT` | `True` | 圆环拟合是否走 C++ |
+| `TARGET_ACCEL_USE_CPP_LK` | `False` | 角点 LK + RANSAC + 投影是否走 C++ |
+| `TARGET_ACCEL_USE_CPP_PERSPECTIVE` | `False` | 透视矩阵、warp 和逆投影是否走 C++ |
+| `TARGET_ACCEL_USE_CPP_RING_FIT` | `False` | 圆环拟合是否走 C++ |
 
-`auto` 模式下优先加载 C++ 动态库并使用 NEON 分支（ARM 平台编译时启用）；加载失败会自动回退到原 Python 算法。`npu` 为流水线预留模式，当前会在无可用 NPU stage 时自动回退。
+联调和量产回退版本默认使用 Python；`TARGET_ACCEL_BACKEND="python"` 会明确禁用原生库加载，避免未完成的 C++ 加速影响联调。确需测试原生加速时再改为 `auto` 并编译 `.so`；加载失败也会自动回退到原 Python 算法。`npu` 为流水线预留模式，当前会在无可用 NPU stage 时自动回退。
 
 ### 5.3 `vision/lighting.py`
 
@@ -724,7 +724,21 @@ cd vision/native
 ./build_with_maixcdk.sh
 ```
 
-脚本内部使用 `maixcdk -p maixcam build`，适配 MaixCAM / MaixCAM Pro 平台。
+首次运行时，脚本会进入 `maixcdk menuconfig`；在配置界面选择 **MaixCAM** 平台并保存退出。
+
+完整重新配置或源码新增后使用：
+
+```bash
+./build_with_maixcdk.sh build
+```
+
+只修改已有源文件时可加快编译：
+
+```bash
+./build_with_maixcdk.sh build2
+```
+
+不要使用 `maixcdk -p maixcam build`；在当前 MaixCDK CLI 中，平台选择通过 `menuconfig` 保存，实际构建使用 `maixcdk build` 或 `maixcdk build2`。
 
 产物默认输出到 `vision/native/libtargetdetect_accel.so`，依赖库同步到 `vision/native/dl_lib/`。运行时可通过环境变量 `TARGETDETECT_NATIVE_LIB` 和 `TARGETDETECT_NATIVE_DL_LIB_DIR` 覆盖库与依赖目录。
 
