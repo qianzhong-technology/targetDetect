@@ -255,7 +255,7 @@ def joint_circle_fit(groups, scale_x=1.0, scale_y=1.0):
     )
 
 
-def calculate_fit_rms(groups, center, radii):
+def calculate_fit_rms(groups, center, radii, scale=1.0):
     cx, cy = center
     squared_error_sum = 0.0
     point_count = 0
@@ -270,7 +270,20 @@ def calculate_fit_rms(groups, center, radii):
     if point_count == 0:
         return 999.0
 
-    return math.sqrt(squared_error_sum / point_count)
+    rms = math.sqrt(squared_error_sum / point_count)
+    if rms <= FIT_RMS_WARNING_THRESHOLD * scale:
+        return rms
+
+    ring_scores = []
+    for points, radius in zip(groups, radii):
+        dx = points[:, 0] - cx
+        dy = points[:, 1] - cy
+        error = np.sqrt(dx * dx + dy * dy) - radius
+        ring_scores.append(float(np.median(error * error)))
+
+    if not ring_scores:
+        return rms
+    return math.sqrt(sum(ring_scores) / len(ring_scores))
 
 
 def check_angular_coverage(groups, center):
@@ -444,7 +457,7 @@ def _fit_target_center_pixels(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
             failure_reason = "poor ring coverage"
             continue
 
-        rms = calculate_fit_rms(groups, center, radii)
+        rms = calculate_fit_rms(groups, center, radii, scale)
 
         if CHECK_RING_RADIUS:
             invalid_radius = None
@@ -531,7 +544,7 @@ def fit_target_center(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
         )
         if native_result is not None:
             center, rms, radii, fit_status = native_result
-            if center is not None:
+            if center is not None and fit_status == "OK":
                 return center, rms, radii, fit_status
 
     scale = (scale_x + scale_y) / 2.0
@@ -617,7 +630,7 @@ def fit_target_center(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
         for item in selected
     ) / scale
     if center_spread > max(8.0, RING_SEARCH_TOLERANCE):
-        return None, None, None, "ring centers inconsistent"
+        return _fit_target_center_pixels(mask, scale_x, scale_y)
 
     groups = [item[1][3] for item in selected]
     joint_fit = joint_circle_fit(groups, scale_x, scale_y)
@@ -633,7 +646,7 @@ def fit_target_center(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
         abs(fitted - expected) > MAX_RADIUS_ERROR * scale
         for fitted, expected in zip(fitted_radii, expected_selected_radii)
     ):
-        return None, None, None, "joint radii outside target range"
+        return _fit_target_center_pixels(mask, scale_x, scale_y)
 
     center = (
         (center_local[0] + 0.5) / scale_x - 0.5,
@@ -643,7 +656,8 @@ def fit_target_center(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
     rms = calculate_fit_rms(
         groups,
         center_local,
-        fitted_radii
+        fitted_radii,
+        scale
     ) / scale
 
     fit_status = "OK"
