@@ -173,9 +173,12 @@
 | 参数 | 含义 |
 |---|---|
 | `FRAME_DETECT_SCALE` | 靶纸重检时的缩放比例 |
+| `FRAME_MIN_AREA_RATIO` | 候选框允许占画面的最小面积比例 |
 | `FRAME_ASPECT_TOLERANCE` | 候选框相对 A4 长宽比的最大误差 |
 | `FRAME_HSV_LOW/HIGH` | 黑色靶框的 HSV 范围 |
 | `FRAME_CLOSE_KERNEL` | 黑色掩膜形态学闭运算核 |
+
+远距离靶纸通常面积较小，可通过 `FRAME_MIN_AREA_RATIO` 降低面积门槛。默认为 1%，同时保留边界、凸四边形和 A4 长宽比约束。
 
 靶纸检测优先使用 HSV 黑色掩膜，失败时再使用灰度 Otsu 反色掩膜。
 
@@ -251,10 +254,10 @@
 
 `detect_target_corners()`：
 
-1. 将输入缩放到约 20% 分辨率。
+1. 将输入按 `FRAME_DETECT_SCALE` 缩放（默认约 30% 分辨率）。
 2. 使用黑色 HSV 阈值提取掩膜。
 3. 闭运算并查找轮廓。
-4. 排除边界轮廓和面积小于画面 12%的轮廓。
+4. 排除边界轮廓和面积小于 `FRAME_MIN_AREA_RATIO` 的轮廓。
 5. 使用多个 epsilon 比例近似轮廓为四边形。
 6. 拒绝长宽比与 A4 纸差异超过 25% 的候选。
 7. HSV 检测失败时尝试灰度 Otsu 检测。
@@ -658,7 +661,7 @@ red_excess = red - max(green, blue)
 
 ### 靶纸框约束
 
-- 候选面积不能低于画面 12%。
+- 候选面积不能低于 `FRAME_MIN_AREA_RATIO`（默认画面 1%）。
 - 候选不能位于画面边界。
 - 候选必须近似为凸四边形。
 - 重检候选面积比限制在约 0.85 到 1.15。

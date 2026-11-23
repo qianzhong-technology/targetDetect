@@ -23,6 +23,7 @@ from common.config import (
     FRAME_CLOSE_KERNEL,
     FRAME_ASPECT_TOLERANCE,
     FRAME_DETECT_SCALE,
+    FRAME_MIN_AREA_RATIO,
     FRAME_HSV_HIGH,
     FRAME_HSV_LOW,
     RECT_HEIGHT,
@@ -163,7 +164,7 @@ def detect_target_corners(frame, reference_corners=None):
             ):
                 continue
 
-            if cv2.contourArea(contour) < image_area * 0.12:
+            if cv2.contourArea(contour) < image_area * FRAME_MIN_AREA_RATIO:
                 continue
 
             perimeter = cv2.arcLength(contour, True)
@@ -186,7 +187,7 @@ def detect_target_corners(frame, reference_corners=None):
                     )
 
                     if (
-                        quad_area >= image_area * 0.12
+                        quad_area >= image_area * FRAME_MIN_AREA_RATIO
                         and _matches_target_aspect(quad)
                     ):
                         candidates.append((quad_area, quad))
