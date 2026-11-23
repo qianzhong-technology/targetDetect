@@ -22,6 +22,7 @@ from common.config import (
     CORNER_TRACK_SCALE,
     FRAME_CLOSE_KERNEL,
     FRAME_ASPECT_TOLERANCE,
+    FRAME_ASPECT_WIDE_TOLERANCE,
     FRAME_DETECT_SCALE,
     FRAME_MIN_AREA_RATIO,
     FRAME_HSV_HIGH,
@@ -99,7 +100,12 @@ def _matches_target_aspect(corners):
         RECT_WIDTH / RECT_HEIGHT,
         RECT_HEIGHT / RECT_WIDTH
     )
-    return abs(measured_aspect / expected_aspect - 1.0) <= FRAME_ASPECT_TOLERANCE
+    aspect_error = measured_aspect / expected_aspect - 1.0
+    return (
+        -FRAME_ASPECT_TOLERANCE
+        <= aspect_error
+        <= FRAME_ASPECT_WIDE_TOLERANCE
+    )
 
 
 def detect_target_corners(frame, reference_corners=None):
@@ -750,3 +756,14 @@ def rectified_to_camera(center, H):
     )
 
     return x, y
+
+
+def target_frame_center_to_camera(H):
+    """将靶纸标准校正图的几何中心反投影到相机图像。"""
+    return rectified_to_camera(
+        (
+            (RECT_WIDTH - 1) / 2.0,
+            (RECT_HEIGHT - 1) / 2.0
+        ),
+        H
+    )

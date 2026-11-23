@@ -190,8 +190,8 @@ bool JointCircleFit(
     }
 
     const int ring_count = static_cast<int>(groups.size());
-    const double reference_x = (static_cast<double>(rect_width) - 0.5) * scale_x - 0.5;
-    const double reference_y = (static_cast<double>(rect_height) - 0.5) * scale_y - 0.5;
+    const double reference_x = static_cast<double>(rect_width) * 0.5 * scale_x - 0.5;
+    const double reference_y = static_cast<double>(rect_height) * 0.5 * scale_y - 0.5;
     const int matrix_size = 2 + ring_count;
 
     cv::Mat normal = cv::Mat::zeros(matrix_size, matrix_size, CV_64F);

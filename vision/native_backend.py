@@ -4,7 +4,7 @@ import ctypes
 import glob
 import os
 import threading
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple, TypedDict
 
 import numpy as np
 
@@ -12,6 +12,15 @@ from common.config import (
     TARGET_ACCEL_BACKEND,
     TARGET_ACCEL_LIB_PATH,
 )
+
+
+class NativeLkResult(TypedDict):
+    corners: np.ndarray
+    tracked_points: np.ndarray
+    inlier_count: int
+    support_ratio: float
+    area_ratio: float
+    max_shift: float
 
 
 def _resolve_library_path() -> str:
@@ -321,7 +330,7 @@ class NativeVisionBackend:
         support_min_ratio: float,
         area_min_ratio: float,
         area_max_ratio: float,
-    ) -> Optional[Dict[str, object]]:
+    ) -> Optional[NativeLkResult]:
         self._ensure_initialized()
         if not self._available or self._lib is None:
             return None

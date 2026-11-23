@@ -8,9 +8,13 @@ import numpy as np
 
 from common.config import (
     TARGET_ACCEL_USE_CPP_RING_FIT,
+    CENTER_MAX_OFFSET_PX,
     CENTER_PRIOR_WEIGHT,
     CHECK_RING_RADIUS,
     CENTER_DETECT_SCALE,
+    FAR_CENTER_DETECT_SCALE,
+    FAR_RED_EXCESS_THRESHOLD,
+    FAR_WEAK_RED_EXCESS_THRESHOLD,
     FIT_RMS_WARNING_THRESHOLD,
     MAX_POINTS_PER_RING,
     MAX_RADIUS_ERROR,
@@ -34,7 +38,7 @@ _NATIVE_BACKEND = get_native_backend()
 CANDIDATE_SCORE_MAX_POINTS = 16
 
 
-def extract_red_mask(rectified):
+def extract_red_mask(rectified, red_excess_threshold=8):
     blue = rectified[:, :, 0]
     green = rectified[:, :, 1]
     red = rectified[:, :, 2]
@@ -42,7 +46,7 @@ def extract_red_mask(rectified):
     red_excess = cv2.subtract(red, red_reference)
     _, base_mask = cv2.threshold(
         red_excess,
-        8,
+        red_excess_threshold,
         255,
         cv2.THRESH_BINARY
     )
@@ -193,8 +197,8 @@ def joint_circle_fit(groups, scale_x=1.0, scale_y=1.0):
     if ring_count < 3:
         return None
 
-    reference_x = (RECT_WIDTH - 0.5) * scale_x - 0.5
-    reference_y = (RECT_HEIGHT - 0.5) * scale_y - 0.5
+    reference_x = RECT_WIDTH * 0.5 * scale_x - 0.5
+    reference_y = RECT_HEIGHT * 0.5 * scale_y - 0.5
     matrix_size = 2 + ring_count
     normal = np.zeros((matrix_size, matrix_size), dtype=np.float64)
     values = np.zeros(matrix_size, dtype=np.float64)
@@ -406,8 +410,8 @@ def _fit_target_center_pixels(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
 
     scale = (scale_x + scale_y) / 2.0
     paper_center = (
-        (RECT_WIDTH - 0.5) * scale_x - 0.5,
-        (RECT_HEIGHT - 0.5) * scale_y - 0.5
+        RECT_WIDTH * 0.5 * scale_x - 0.5,
+        RECT_HEIGHT * 0.5 * scale_y - 0.5
     )
     expected_radii = [radius * scale for radius in RING_RADII_PX]
     red_median = (
@@ -491,6 +495,9 @@ def _fit_target_center_pixels(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
             center_full[0] - (RECT_WIDTH - 1) / 2.0,
             center_full[1] - (RECT_HEIGHT - 1) / 2.0
         )
+        if distance_from_paper_center > CENTER_MAX_OFFSET_PX:
+            failure_reason = "center too far from paper center"
+            continue
         rms_full = rms / scale
         score = rms_full + CENTER_PRIOR_WEIGHT * distance_from_paper_center
         candidates.append((
@@ -544,7 +551,14 @@ def fit_target_center(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
         )
         if native_result is not None:
             center, rms, radii, fit_status = native_result
-            if center is not None and fit_status == "OK":
+            if (
+                center is not None
+                and fit_status == "OK"
+                and math.hypot(
+                    center[0] - (RECT_WIDTH - 1) / 2.0,
+                    center[1] - (RECT_HEIGHT - 1) / 2.0
+                ) <= CENTER_MAX_OFFSET_PX
+            ):
                 return center, rms, radii, fit_status
 
     scale = (scale_x + scale_y) / 2.0
@@ -652,6 +666,11 @@ def fit_target_center(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
         (center_local[0] + 0.5) / scale_x - 0.5,
         (center_local[1] + 0.5) / scale_y - 0.5
     )
+    if math.hypot(
+        center[0] - (RECT_WIDTH - 1) / 2.0,
+        center[1] - (RECT_HEIGHT - 1) / 2.0
+    ) > CENTER_MAX_OFFSET_PX:
+        return _fit_target_center_pixels(mask, scale_x, scale_y)
     radii = [radius / scale for radius in fitted_radii]
     rms = calculate_fit_rms(
         groups,
@@ -670,9 +689,9 @@ def fit_target_center(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
     return center, rms, radii, fit_status
 
 
-def detect_target_center(rectified):
+def detect_target_center(rectified, distant=False):
     """
-    在透视校正后的图像中计算靶心，并在标准掩膜置信度不足时尝试暗红候选。
+    计算靶心；远距离标准掩膜失败时增加低反差圆环重试。
     """
 
     process_width = max(1, int(round(rectified.shape[1] * CENTER_DETECT_SCALE)))
@@ -732,6 +751,80 @@ def detect_target_center(rectified):
                 fit_status = expanded_status
                 selected_mask = expanded_mask
                 low_light_used = True
+
+    if (
+        distant
+        and (
+            center is None
+            or rms is None
+            or rms > FIT_RMS_WARNING_THRESHOLD
+        )
+    ):
+        scaled_images = {
+            CENTER_DETECT_SCALE: (
+                process_image,
+                scale_x,
+                scale_y
+            )
+        }
+        retry_options = (
+            (CENTER_DETECT_SCALE, FAR_RED_EXCESS_THRESHOLD),
+            (FAR_CENTER_DETECT_SCALE, FAR_RED_EXCESS_THRESHOLD),
+            (FAR_CENTER_DETECT_SCALE, FAR_WEAK_RED_EXCESS_THRESHOLD)
+        )
+
+        for retry_scale, red_threshold in retry_options:
+            if retry_scale not in scaled_images:
+                retry_width = max(
+                    1,
+                    int(round(rectified.shape[1] * retry_scale))
+                )
+                retry_height = max(
+                    1,
+                    int(round(rectified.shape[0] * retry_scale))
+                )
+                retry_image = cv2.resize(
+                    rectified,
+                    (retry_width, retry_height),
+                    interpolation=cv2.INTER_AREA
+                )
+                scaled_images[retry_scale] = (
+                    retry_image,
+                    retry_width / float(rectified.shape[1]),
+                    retry_height / float(rectified.shape[0])
+                )
+
+            retry_image, retry_scale_x, retry_scale_y = (
+                scaled_images[retry_scale]
+            )
+            retry_mask, _ = extract_red_mask(
+                retry_image,
+                red_excess_threshold=red_threshold
+            )
+            retry_center, retry_rms, retry_radii, retry_status = (
+                fit_target_center(
+                    retry_mask,
+                    retry_scale_x,
+                    retry_scale_y
+                )
+            )
+            if (
+                retry_center is not None
+                and retry_rms is not None
+                and (
+                    center is None
+                    or rms is None
+                    or retry_rms < rms
+                )
+            ):
+                center = retry_center
+                rms = retry_rms
+                radii = retry_radii
+                fit_status = retry_status
+                selected_mask = retry_mask
+
+            if fit_status == "OK":
+                break
 
     red_low_light_info = (
         red_low_light_info[0],

@@ -15,6 +15,7 @@ from common.config import (
     CORNER_DETECT_INTERVAL,
     CORNER_TRACK_SCALE,
     DISPLAY_UPDATE_INTERVAL,
+    FAR_TARGET_AREA_RATIO,
     GIMBAL_CENTER_X,
     GIMBAL_CENTER_Y,
     GIMBAL_DEADBAND_PX,
@@ -69,6 +70,7 @@ from vision.target_frame import (
     make_homography,
     rectify_image,
     rectified_to_camera,
+    target_frame_center_to_camera,
 )
 
 
@@ -406,6 +408,11 @@ def main():
             )
             module_times["target_frame"] += time.monotonic() - stage_start
 
+            target_area_ratio = (
+                abs(cv2.contourArea(corners.astype(np.float32)))
+                / float(CAMERA_WIDTH * CAMERA_HEIGHT)
+            )
+
             # ------------------------------------------------
             # 提取红色圆环并拟合靶心
             # ------------------------------------------------
@@ -418,7 +425,10 @@ def main():
                 _,
                 fit_status,
                 _
-            ) = detect_target_center(rectified)
+            ) = detect_target_center(
+                rectified,
+                distant=target_area_ratio <= FAR_TARGET_AREA_RATIO
+            )
             module_times["target_center"] += time.monotonic() - stage_start
 
             if center_rectified is not None:
@@ -429,6 +439,9 @@ def main():
                     H
                 )
                 module_times["target_frame"] += time.monotonic() - stage_start
+            else:
+                center_camera = target_frame_center_to_camera(H)
+                fit_status = "frame center fallback"
 
         if corners is not None:
             tracking_center = (
@@ -472,7 +485,11 @@ def main():
             target_point = (fx, fy)
 
         elif center_camera is not None:
-            target_status = "LOW CONF"
+            target_status = (
+                "FRAME CENTER"
+                if fit_status == "frame center fallback"
+                else "LOW CONF"
+            )
             target_status_color = (0, 165, 255)
             target_point = (center_camera[0], center_camera[1])
 
