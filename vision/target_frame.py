@@ -12,9 +12,21 @@ from common.config import (
     CORNER_TRACK_MAX_FEATURES,
     CORNER_TRACK_MAX_FRAMES,
     CORNER_TRACK_MIN_FEATURES,
+    CORNER_DETECT_INTERVAL,
     CORNER_TRACK_REFRESH_FEATURES,
-    CORNER_TRACK_MAX_PREDICTED_FRAMES,
+    CORNER_TRACK_HOMOGRAPHY_INTERVAL,
+    CORNER_TRACK_AFFINE_MAX_MEDIAN_RESIDUAL,
+    CORNER_TRACK_AFFINE_MAX_RESIDUAL,
+    CORNER_TRACK_MAX_OFFSCREEN_FRAMES,
+    CORNER_LOST_DETECT_INTERVAL,
+    CORNER_PREDICT_DETECT_INTERVAL,
+    CORNER_TRACK_VISIBLE_BLIND_FRAMES,
+    CORNER_TRACK_PREDICTION_VELOCITY_DECAY,
+    CORNER_TRACK_CENTER_ANCHOR_MAX_CORRECTION_PX,
+    CORNER_TRACK_MOTION_THRESHOLD_PX,
+    CORNER_TRACK_PREDICTION_TOLERANCE_PX,
     CORNER_TRACK_SMOOTH_ALPHA,
+    CORNER_TRACK_VELOCITY_ALPHA,
     CORNER_TRACK_MAX_SHIFT,
     CORNER_TRACK_AREA_MIN_RATIO,
     CORNER_TRACK_AREA_MAX_RATIO,
@@ -293,12 +305,23 @@ class TargetCornerTracker:
         self.predicted_corners: Optional[np.ndarray] = None
         self.corner_velocity: Optional[np.ndarray] = None
         self.predicted_frames = 0
+        self.offscreen_predicted_frames = 0
+        self.blind_prediction_frames = 0
+        self.track_width: Optional[int] = None
+        self.track_height: Optional[int] = None
         self.pending_corners: Optional[np.ndarray] = None
         self.pending_hits = 0
+        self.frames_since_homography = 0
         self.clear()
 
     @property
     def is_active(self):
+        if self.is_predicted:
+            return (
+                self.previous_gray is not None
+                and self.predicted_corners is not None
+                and self.corner_velocity is not None
+            )
         return (
             self.previous_gray is not None
             and self.previous_points is not None
@@ -309,6 +332,16 @@ class TargetCornerTracker:
     def is_predicted(self):
         return self.predicted_frames > 0
 
+    def needs_redetection(self, frame_index):
+        if self.is_predicted:
+            return (
+                self.predicted_frames == 1
+                or self.predicted_frames % CORNER_PREDICT_DETECT_INTERVAL == 0
+            )
+        if not self.is_active:
+            return frame_index % CORNER_LOST_DETECT_INTERVAL == 0
+        return self.frames_since_detection >= CORNER_DETECT_INTERVAL
+
     def clear(self):
         self.previous_gray = None
         self.previous_points = None
@@ -316,10 +349,16 @@ class TargetCornerTracker:
         self.predicted_corners = None
         self.corner_velocity = None
         self.predicted_frames = 0
+        self.offscreen_predicted_frames = 0
+        self.blind_prediction_frames = 0
+        self.track_width = None
+        self.track_height = None
         self.pending_corners = None
         self.pending_hits = 0
+        self.frames_since_homography = 0
         self.frames_since_detection = 0
         self.failures = 0
+        self.frames_since_homography = 0
 
     @staticmethod
     def _find_features(gray, corners):
@@ -349,11 +388,27 @@ class TargetCornerTracker:
             return cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
         return small_frame
 
+    def _corners_intersect_frame(self, corners):
+        if self.track_width is None or self.track_height is None:
+            return True
+        min_x = float(np.min(corners[:, 0]))
+        max_x = float(np.max(corners[:, 0]))
+        min_y = float(np.min(corners[:, 1]))
+        max_y = float(np.max(corners[:, 1]))
+        return not (
+            max_x < 0.0
+            or min_x > self.track_width - 1
+            or max_y < 0.0
+            or min_y > self.track_height - 1
+        )
+
     def initialize(self, frame, corners):
         gray = self._prepare_gray(frame)
         candidate_corners = (
             corners.astype(np.float32) * CORNER_TRACK_SCALE
         )
+        measured_velocity = None
+        direct_motion = False
 
         if self.corners is not None:
             old_area = abs(cv2.contourArea(
@@ -370,10 +425,32 @@ class TargetCornerTracker:
                 candidate_corners - self.corners,
                 axis=1
             ))
+            velocity_prediction_error = None
+            if self.corner_velocity is not None:
+                predicted_corners = (
+                    self.corners + self.corner_velocity
+                )
+                velocity_prediction_error = np.max(np.linalg.norm(
+                    candidate_corners - predicted_corners,
+                    axis=1
+                ))
+
+            motion_consistent = (
+                velocity_prediction_error is not None
+                and velocity_prediction_error
+                <= max_shift * CORNER_TRACK_SCALE
+            )
+            geometry_consistent = (
+                CORNER_TRACK_AREA_MIN_RATIO
+                <= area_ratio
+                <= CORNER_TRACK_AREA_MAX_RATIO
+            )
             if (
-                area_ratio < CORNER_TRACK_AREA_MIN_RATIO
-                or area_ratio > CORNER_TRACK_AREA_MAX_RATIO
-                or corner_shift > max_shift * CORNER_TRACK_SCALE
+                not geometry_consistent
+                or (
+                    corner_shift > max_shift * CORNER_TRACK_SCALE
+                    and not motion_consistent
+                )
             ):
                 if self.pending_corners is not None:
                     pending_shift = np.max(np.linalg.norm(
@@ -395,45 +472,289 @@ class TargetCornerTracker:
                     self.pending_corners = None
                     self.pending_hits = 0
                 else:
-                    candidate_corners = self.corners.copy()
+                    return None
             else:
                 self.pending_corners = None
                 self.pending_hits = 0
+
+            measured_velocity = (
+                candidate_corners - self.corners
+            ).astype(np.float32)
+            direct_motion = (
+                np.max(np.linalg.norm(measured_velocity, axis=1))
+                / CORNER_TRACK_SCALE
+                > CORNER_TRACK_MOTION_THRESHOLD_PX
+                and motion_consistent
+            )
+            if not direct_motion:
                 candidate_corners = (
                     CORNER_TRACK_SMOOTH_ALPHA * candidate_corners
                     + (1.0 - CORNER_TRACK_SMOOTH_ALPHA) * self.corners
                 ).astype(np.float32)
+            else:
+                candidate_corners = candidate_corners.astype(np.float32)
+
+        next_points = self._find_features(
+            gray,
+            candidate_corners
+        )
+        if next_points is None or len(next_points) < CORNER_TRACK_MIN_FEATURES:
+            return None
 
         self.corners = candidate_corners
         self.predicted_corners = self.corners.copy()
-        self.corner_velocity = np.zeros((4, 2), dtype=np.float32)
+        if measured_velocity is not None:
+            self.corner_velocity = measured_velocity
+        else:
+            self.corner_velocity = np.zeros((4, 2), dtype=np.float32)
         self.predicted_frames = 0
+        self.offscreen_predicted_frames = 0
+        self.blind_prediction_frames = 0
+        self.track_width = gray.shape[1]
+        self.track_height = gray.shape[0]
         self.previous_gray = gray
-        self.previous_points = self._find_features(
-            gray,
-            self.corners
-        )
+        self.previous_points = next_points
         self.frames_since_detection = 0
         self.failures = 0
         return self.corners.copy() / CORNER_TRACK_SCALE
 
-    def _tracking_failed(self):
+    def _tracking_failed(self, gray=None):
         self.failures += 1
         if self.predicted_corners is None:
             return None
         if self.corner_velocity is not None:
+            self.corner_velocity = (
+                self.corner_velocity
+                * CORNER_TRACK_PREDICTION_VELOCITY_DECAY
+            ).astype(np.float32)
             self.predicted_corners = (
                 self.predicted_corners + self.corner_velocity
             ).astype(np.float32)
         self.predicted_frames += 1
-        if self.predicted_frames >= CORNER_TRACK_MAX_PREDICTED_FRAMES:
+        self.blind_prediction_frames += 1
+        if self._corners_intersect_frame(self.predicted_corners):
+            self.offscreen_predicted_frames = 0
+            if (
+                self.blind_prediction_frames
+                > CORNER_TRACK_VISIBLE_BLIND_FRAMES
+            ):
+                self.clear()
+                return None
+        else:
+            self.offscreen_predicted_frames += 1
+        if (
+            self.offscreen_predicted_frames
+            > CORNER_TRACK_MAX_OFFSCREEN_FRAMES
+        ):
             self.clear()
             return None
         self.corners = self.predicted_corners.copy()
+        if gray is not None:
+            refreshed_points = self._find_features(
+                gray,
+                self.corners
+            )
+            if (
+                refreshed_points is not None
+                and len(refreshed_points) >= 4
+            ):
+                self.previous_gray = gray
+                self.previous_points = refreshed_points.astype(
+                    np.float32,
+                    copy=False
+                )
         return self.predicted_corners.copy() / CORNER_TRACK_SCALE
 
-    def update(self, frame):
+    def _update_prediction_from_visible_features(self, gray):
+        if (
+            self.previous_gray is None
+            or self.previous_points is None
+            or self.corners is None
+            or len(self.previous_points) < 4
+        ):
+            return False
+
+        next_points, forward_status, _ = cv2.calcOpticalFlowPyrLK(
+            self.previous_gray,
+            gray,
+            self.previous_points,
+            np.empty_like(self.previous_points),
+            **LK_FLOW_OPTIONS
+        )
+        if next_points is None or forward_status is None:
+            return False
+
+        current = next_points.reshape(-1, 2)
+        previous = self.previous_points.reshape(-1, 2)
+        valid = (
+            (forward_status.reshape(-1) != 0)
+            & np.isfinite(current).all(axis=1)
+            & (current[:, 0] >= 0.0)
+            & (current[:, 0] < gray.shape[1])
+            & (current[:, 1] >= 0.0)
+            & (current[:, 1] < gray.shape[0])
+        )
+        previous_valid = previous[valid]
+        current_valid = current[valid]
+        if len(current_valid) < 4:
+            return False
+
+        displacement = current_valid - previous_valid
+        median_delta = np.median(displacement, axis=0)
+        residual = np.linalg.norm(
+            displacement - median_delta,
+            axis=1
+        )
+        median_residual = float(np.median(residual))
+        mad_residual = float(np.median(
+            np.abs(residual - median_residual)
+        ))
+        inliers = residual <= max(
+            0.75,
+            median_residual + 3.0 * 1.4826 * mad_residual
+        )
+        if np.count_nonzero(inliers) < 4:
+            return False
+
+        delta = np.median(
+            displacement[inliers],
+            axis=0
+        ).astype(np.float32)
+        predicted_corners = self.corners + delta
+        if not np.isfinite(predicted_corners).all():
+            return False
+        if not self._corners_intersect_frame(predicted_corners):
+            return False
+
+        visible_inliers = current_valid[inliers]
+        inside_count = sum(
+            cv2.pointPolygonTest(
+                predicted_corners,
+                (float(point[0]), float(point[1])),
+                False
+            ) >= 0.0
+            for point in visible_inliers
+        )
+        if inside_count < max(2, len(visible_inliers) // 4):
+            return False
+
+        if self.corner_velocity is None:
+            velocity = delta.copy()
+        else:
+            velocity = (
+                CORNER_TRACK_VELOCITY_ALPHA * delta
+                + (1.0 - CORNER_TRACK_VELOCITY_ALPHA)
+                * self.corner_velocity
+            ).astype(np.float32)
+
+        corrected_corners = predicted_corners.astype(np.float32)
+        self.corners = corrected_corners
+        self.predicted_corners = corrected_corners.copy()
+        self.corner_velocity = velocity
+        self.predicted_frames += 1
+        self.blind_prediction_frames = 0
+        self.offscreen_predicted_frames = (
+            0
+            if self._corners_intersect_frame(self.predicted_corners)
+            else self.offscreen_predicted_frames + 1
+        )
+        self.previous_gray = gray
+
+        visible_points = visible_inliers.reshape(-1, 1, 2)
+        if len(visible_points) < CORNER_TRACK_REFRESH_FEATURES:
+            refreshed_points = self._find_features(
+                gray,
+                self.corners
+            )
+            if (
+                refreshed_points is not None
+                and len(refreshed_points) >= 4
+            ):
+                visible_points = refreshed_points
+        self.previous_points = visible_points.astype(
+            np.float32,
+            copy=False
+        )
+        return True
+
+    def _apply_prediction_center_anchor(self, center_anchor):
+        if (
+            center_anchor is None
+            or self.predicted_corners is None
+        ):
+            return False
+
+        full_corners = (
+            self.predicted_corners.astype(np.float32)
+            / CORNER_TRACK_SCALE
+        )
+        if not cv2.isContourConvex(
+            full_corners.reshape(-1, 1, 2)
+        ):
+            return False
+
+        H = make_homography(full_corners)
+        current_center = target_frame_center_to_camera(H)
+        if current_center is None:
+            return False
+        correction = (
+            np.asarray(center_anchor, dtype=np.float32)
+            - np.asarray(current_center, dtype=np.float32)
+        )
+        correction_size = float(np.linalg.norm(correction))
+        if (
+            correction_size < 0.5
+            or correction_size
+            > CORNER_TRACK_CENTER_ANCHOR_MAX_CORRECTION_PX
+        ):
+            return False
+
+        correction_scaled = (
+            correction * CORNER_TRACK_SCALE
+        ).astype(np.float32)
+        corrected_corners = (
+            self.predicted_corners + correction_scaled
+        )
+        if not self._corners_intersect_frame(corrected_corners):
+            return False
+
+        self.corners = corrected_corners
+        self.predicted_corners = corrected_corners.copy()
+        self.offscreen_predicted_frames = 0
+        self.blind_prediction_frames = 0
+        if self.previous_points is not None:
+            self.previous_points = (
+                self.previous_points.astype(np.float32)
+                + correction_scaled
+            )
+        if (
+            self.corner_velocity is not None
+            and correction_size > 12.0
+        ):
+            self.corner_velocity = (
+                self.corner_velocity * 0.7
+            ).astype(np.float32)
+        return True
+
+    def update(self, frame, center_anchor=None):
         gray = self._prepare_gray(frame)
+        if self.is_predicted:
+            if self._update_prediction_from_visible_features(gray):
+                self._apply_prediction_center_anchor(center_anchor)
+                current_corners = self.corners
+                if current_corners is None:
+                    return None
+                return current_corners.copy() / CORNER_TRACK_SCALE
+            predicted = self._tracking_failed(gray)
+            if predicted is not None:
+                self._apply_prediction_center_anchor(center_anchor)
+                current_corners = self.corners
+                if current_corners is not None:
+                    predicted = (
+                        current_corners.copy() / CORNER_TRACK_SCALE
+                    )
+            return predicted
+
         previous_gray = self.previous_gray
         previous_points = self.previous_points
         corners = self.corners
@@ -446,8 +767,7 @@ class TargetCornerTracker:
             return None
 
         if self.frames_since_detection >= CORNER_TRACK_MAX_FRAMES:
-            self.clear()
-            return None
+            return self._tracking_failed(gray)
 
         current_corners = None
         tracked_points = None
@@ -469,7 +789,7 @@ class TargetCornerTracker:
                 area_max_ratio=CORNER_TRACK_AREA_MAX_RATIO
             )
             if native_result is None:
-                return self._tracking_failed()
+                return self._tracking_failed(gray)
 
             current_corners = native_result["corners"]
             tracked_points = native_result["tracked_points"]
@@ -483,7 +803,7 @@ class TargetCornerTracker:
                 CORNER_TRACK_MAX_SHIFT * CORNER_TRACK_SCALE,
                 diagonal * 0.35
             ):
-                return self._tracking_failed()
+                return self._tracking_failed(gray)
         else:
             next_points, forward_status, _ = cv2.calcOpticalFlowPyrLK(
                 previous_gray,
@@ -494,7 +814,7 @@ class TargetCornerTracker:
             )
 
             if next_points is None or forward_status is None:
-                return self._tracking_failed()
+                return self._tracking_failed(gray)
 
             current = next_points.reshape(-1, 2)
             forward_ok = forward_status.reshape(-1) != 0
@@ -506,16 +826,66 @@ class TargetCornerTracker:
             previous_valid = previous_points.reshape(-1, 2)[valid]
             current_valid = current[valid]
             if len(previous_valid) < CORNER_TRACK_MIN_FEATURES:
-                return self._tracking_failed()
+                return self._tracking_failed(gray)
 
-            homography, inlier_mask = cv2.findHomography(
-                previous_valid,
-                current_valid,
-                cv2.RANSAC,
-                3.0
+            use_full_homography = (
+                self.frames_since_homography
+                >= CORNER_TRACK_HOMOGRAPHY_INTERVAL
+                or self.frames_since_homography == 0
             )
+            affine_accepted = False
+            if not use_full_homography:
+                affine, affine_mask = cv2.estimateAffinePartial2D(
+                    previous_valid,
+                    current_valid,
+                    method=cv2.RANSAC,
+                    ransacReprojThreshold=1.5
+                )
+                if affine is not None and affine_mask is not None:
+                    affine_inliers = affine_mask.reshape(-1) != 0
+                    if np.count_nonzero(affine_inliers) >= (
+                        CORNER_TRACK_MIN_FEATURES
+                    ):
+                        affine_points = cv2.transform(
+                            previous_valid[affine_inliers].reshape(
+                                -1,
+                                1,
+                                2
+                            ),
+                            affine
+                        ).reshape(-1, 2)
+                        residual = np.linalg.norm(
+                            affine_points
+                            - current_valid[affine_inliers],
+                            axis=1
+                        )
+                        affine_accepted = (
+                            np.median(residual)
+                            <= CORNER_TRACK_AFFINE_MAX_MEDIAN_RESIDUAL
+                            and np.max(residual)
+                            <= CORNER_TRACK_AFFINE_MAX_RESIDUAL
+                            and np.count_nonzero(affine_inliers)
+                            / len(previous_valid)
+                            >= 0.75
+                        )
+                        if affine_accepted:
+                            homography = np.eye(
+                                3,
+                                dtype=np.float32
+                            )
+                            homography[:2] = affine
+                            inlier_mask = affine_mask
+            if use_full_homography or not affine_accepted:
+                homography, inlier_mask = cv2.findHomography(
+                    previous_valid,
+                    current_valid,
+                    cv2.RANSAC,
+                    3.0
+                )
+                if homography is not None:
+                    self.frames_since_homography = 0
             if homography is None or inlier_mask is None:
-                return self._tracking_failed()
+                return self._tracking_failed(gray)
 
             inliers = inlier_mask.reshape(-1) != 0
             inlier_count = int(np.count_nonzero(inliers))
@@ -523,7 +893,7 @@ class TargetCornerTracker:
                 inlier_count < CORNER_TRACK_MIN_FEATURES
                 or inlier_count / len(previous_valid) < 0.75
             ):
-                return self._tracking_failed()
+                return self._tracking_failed(gray)
 
             previous_corners = corners.reshape(-1, 1, 2)
             previous_area = abs(cv2.contourArea(previous_corners))
@@ -536,7 +906,7 @@ class TargetCornerTracker:
                 else 0.0
             )
             if support_ratio < 0.01:
-                return self._tracking_failed()
+                return self._tracking_failed(gray)
 
             current_corners = cv2.perspectiveTransform(
                 previous_corners,
@@ -548,7 +918,7 @@ class TargetCornerTracker:
                     current_corners.astype(np.float32).reshape(-1, 1, 2)
                 )
             ):
-                return self._tracking_failed()
+                return self._tracking_failed(gray)
 
             current_area = abs(cv2.contourArea(
                 current_corners.astype(np.float32).reshape(-1, 1, 2)
@@ -559,7 +929,7 @@ class TargetCornerTracker:
                 <= area_ratio
                 <= CORNER_TRACK_AREA_MAX_RATIO
             ):
-                return self._tracking_failed()
+                return self._tracking_failed(gray)
 
             diagonal = max(
                 np.linalg.norm(corners[0] - corners[2]),
@@ -573,22 +943,66 @@ class TargetCornerTracker:
                 CORNER_TRACK_MAX_SHIFT * CORNER_TRACK_SCALE,
                 diagonal * 0.35
             ):
-                return self._tracking_failed()
+                return self._tracking_failed(gray)
 
             tracked_points = current_valid[inliers].reshape(-1, 1, 2)
 
         current_delta = current_corners - corners
+        near_frame_edge = (
+            (
+                np.min(corners[:, 0]) <= 0.0
+                or np.max(corners[:, 0]) >= gray.shape[1] - 1
+                or np.min(corners[:, 1]) <= 0.0
+                or np.max(corners[:, 1]) >= gray.shape[0] - 1
+            )
+            or (
+                np.min(current_corners[:, 0]) <= 0.0
+                or np.max(current_corners[:, 0]) >= gray.shape[1] - 1
+                or np.min(current_corners[:, 1]) <= 0.0
+                or np.max(current_corners[:, 1]) >= gray.shape[0] - 1
+            )
+        )
+        if (
+            near_frame_edge
+            and self.corner_velocity is not None
+            and (
+                np.max(np.linalg.norm(
+                    self.corner_velocity,
+                    axis=1
+                ))
+                / CORNER_TRACK_SCALE
+                >= CORNER_TRACK_MOTION_THRESHOLD_PX
+            )
+        ):
+            predicted_corners = corners + self.corner_velocity
+            prediction_error = (
+                np.max(np.linalg.norm(
+                    current_corners - predicted_corners,
+                    axis=1
+                ))
+                / CORNER_TRACK_SCALE
+            )
+            if prediction_error > CORNER_TRACK_PREDICTION_TOLERANCE_PX:
+                return self._tracking_failed(gray)
+
         if self.corner_velocity is None:
             self.corner_velocity = current_delta
         else:
             self.corner_velocity = (
-                0.35 * current_delta
-                + 0.65 * self.corner_velocity
+                CORNER_TRACK_VELOCITY_ALPHA * current_delta
+                + (1.0 - CORNER_TRACK_VELOCITY_ALPHA)
+                * self.corner_velocity
             )
-        current_corners = (
-            CORNER_TRACK_SMOOTH_ALPHA * current_corners
-            + (1.0 - CORNER_TRACK_SMOOTH_ALPHA) * corners
-        ).astype(np.float32)
+
+        max_motion = (
+            np.max(np.linalg.norm(current_delta, axis=1))
+            / CORNER_TRACK_SCALE
+        )
+        if max_motion <= CORNER_TRACK_MOTION_THRESHOLD_PX:
+            current_corners = (
+                CORNER_TRACK_SMOOTH_ALPHA * current_corners
+                + (1.0 - CORNER_TRACK_SMOOTH_ALPHA) * corners
+            ).astype(np.float32)
 
         if len(tracked_points) < CORNER_TRACK_REFRESH_FEATURES:
             refreshed_points = self._find_features(gray, current_corners)
@@ -603,12 +1017,16 @@ class TargetCornerTracker:
             np.float32,
             copy=False
         )
-        self.corners = current_corners.astype(np.float32)
-        self.predicted_corners = self.corners.copy()
+        accepted_corners = current_corners.astype(np.float32)
+        self.corners = accepted_corners
+        self.predicted_corners = accepted_corners.copy()
         self.predicted_frames = 0
+        self.offscreen_predicted_frames = 0
+        self.blind_prediction_frames = 0
         self.frames_since_detection += 1
+        self.frames_since_homography += 1
         self.failures = 0
-        return self.corners.copy() / CORNER_TRACK_SCALE
+        return accepted_corners.copy() / CORNER_TRACK_SCALE
 
 
 def get_tracking_roi(corners, center, frame_width, frame_height):
@@ -694,7 +1112,10 @@ def make_homography(corners):
     return H
 
 
-def rectify_image(frame, H):
+def rectify_image(
+    frame,
+    H
+):
     if (
         TARGET_ACCEL_USE_CPP_PERSPECTIVE
         and _NATIVE_BACKEND.is_available

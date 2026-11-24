@@ -163,6 +163,7 @@
 | `CAMERA_WIDTH` | 640 | 摄像头宽度 |
 | `CAMERA_HEIGHT` | 480 | 摄像头高度 |
 | `CAMERA_FPS` | 30 | 摄像头目标帧率 |
+| `CENTER_REFRESH_INTERVAL` | 5 | TRACK 模式每隔多少帧重新计算一次红环靶心 |
 | `RECT_WIDTH` | 210 | 校正图宽度 |
 | `RECT_HEIGHT` | 297 | 校正图高度 |
 | `PIXELS_PER_MM` | 1.0 | 校正图比例 |
@@ -197,6 +198,16 @@
 | `FAR_CENTER_DETECT_SCALE` | 远距重试使用的工作图缩放比例 |
 | `FAR_RED_EXCESS_THRESHOLD` | 远距低反差红环的主重试阈值 |
 | `FAR_WEAK_RED_EXCESS_THRESHOLD` | 极淡红环的最终重试阈值 |
+| `RAW_CENTER_DETECT_SCALE` | 预测锚点从原图提取红环时的缩放比例 |
+| `RAW_CENTER_RED_THRESHOLD` | 预测锚点红色通道差值阈值 |
+| `RAW_CENTER_CLUSTER_PX` | 同心红环候选中心聚类半径 |
+| `RAW_CENTER_MIN_CANDIDATES` | 同心中心最少候选数量 |
+| `REFLECTION_GLARE_MIN_VALUE` | 反光判定的最低亮度 |
+| `REFLECTION_GLARE_MAX_SATURATION` | 反光判定允许的最高饱和度 |
+| `REFLECTION_GLARE_MIN_AREA_RATIO` | 触发抗反光重试所需的高光面积比例 |
+| `REFLECTION_MIN_RING_POINTS` | 反光兜底时单环最少像素 |
+| `REFLECTION_MIN_VALID_RINGS` | 反光兜底所需的最少有效环数 |
+| `REFLECTION_RETRY_RMS_THRESHOLD` | 触发低反差反光重试的 RMS |
 | `FIT_RMS_WARNING_THRESHOLD` | 低置信 RMS 阈值 |
 | `CENTER_MAX_OFFSET_PX` | 圆心相对靶纸几何中心允许的最大偏移 |
 
@@ -206,15 +217,26 @@
 |---|---:|---|
 | `CORNER_TRACK_SCALE` | 0.25 | LK 使用的灰度图比例 |
 | `CORNER_TRACK_MAX_FEATURES` | 24 | 每次最多提取特征数 |
+| `CORNER_TRACK_HOMOGRAPHY_INTERVAL` | 5 | 快速仿射跟踪期间每隔多少帧执行完整单应校正 |
+| `CORNER_TRACK_AFFINE_MAX_MEDIAN_RESIDUAL` | 0.5 | 仿射快速路径允许的中位重投影误差 |
+| `CORNER_TRACK_AFFINE_MAX_RESIDUAL` | 1.5 | 仿射快速路径允许的最大重投影误差 |
 | `CORNER_TRACK_MIN_FEATURES` | 12 | 可接受跟踪所需特征数 |
 | `CORNER_DETECT_INTERVAL` | 15 | 周期重检角点的帧间隔 |
 | `CORNER_TRACK_MAX_FRAMES` | 90 | 一次跟踪生命周期上限 |
-| `CORNER_TRACK_MAX_PREDICTED_FRAMES` | 12 | LK 失败时最多外推帧数 |
+| `CORNER_TRACK_MAX_OFFSCREEN_FRAMES` | 24 | 预测矩形完全离画后的最多外推帧数 |
+| `CORNER_PREDICT_DETECT_INTERVAL` | 6 | 预测期间每隔多少帧重检一次黑框 |
+| `CORNER_LOST_DETECT_INTERVAL` | 2 | 完全丢失后的黑框重检间隔 |
+| `CORNER_TRACK_VISIBLE_BLIND_FRAMES` | 8 | 部分可见时连续缺少光流观测的容忍帧数 |
+| `CORNER_TRACK_PREDICTION_VELOCITY_DECAY` | 0.90 | 无观测外推时每帧保留的速度比例 |
+| `CORNER_TRACK_CENTER_ANCHOR_MAX_CORRECTION_PX` | 180.0 | 红环锚点单次允许修正的预测中心误差 |
 | `CORNER_TRACK_MAX_SHIFT` | 18 | 重检角点允许的最大位移 |
 | `CORNER_TRACK_AREA_MIN_RATIO` | 0.85 | 重检候选允许的最小面积比 |
 | `CORNER_TRACK_AREA_MAX_RATIO` | 1.15 | 重检候选允许的最大面积比 |
 | `CORNER_TRACK_REJECTED_FRAMES` | 2 | 异常候选连续出现多少次后才接受 |
 | `CORNER_TRACK_SMOOTH_ALPHA` | 0.85 | 正常重检候选的新位置权重 |
+| `CORNER_TRACK_MOTION_THRESHOLD_PX` | 1.0 | 超过该位移时不平滑 LK 角点，避免快速运动滞后 |
+| `CORNER_TRACK_VELOCITY_ALPHA` | 0.70 | 当前帧 LK 速度用于周期重检预测的权重 |
+| `CORNER_TRACK_PREDICTION_TOLERANCE_PX` | 2.5 | 出画边界附近 LK 偏离角点速度预测的最大允许误差 |
 
 #### 原生加速后端
 
@@ -278,14 +300,20 @@
 
 1. 靶框四角内提取最多 24 个 `goodFeaturesToTrack` 特征。
 2. 将特征从上一帧灰度图跟踪到当前灰度图。
-3. 使用 RANSAC 计算特征前后对应关系的单应矩阵。
+3. 使用 RANSAC 计算特征前后对应关系；普通小运动走相似变换快速路径，每 5 帧及残差超标时回退完整单应。
 4. 内点比例低于 75%时拒绝该帧跟踪。
 5. 将上一时刻四角通过同态变换投影到当前帧。
 6. 对面积比、角点位移、凸性和异常形变做约束。
-7. 正常候选使用新旧角点平滑；异常候选需连续一致后才切换。
-8. LK 失败时利用角点速度进行有限帧外推。
+7. 静止或小于 1 px 的微动使用新旧角点平滑；超过阈值的快速运动直接采用 LK 结果，避免逐帧累积滞后。
+8. 周期重检若符合 LK 速度预测，即使位移大于普通跳变阈值也直接接管；不一致候选不会重置当前光流状态。
+9. 目标一边出画时，若 LK 结果明显偏离速度预测则切换为纯角点外推，避免旧帧特征导致预测框回跳。
+10. 预测期间每 6 帧重检一次；检测恢复后重新初始化 LK 特征。预测帧不执行透视校正和红环拟合，直接外推靶框中心。
+11. 预测矩形仍与画面有交叠时，继续利用可见 LK 特征计算稳健位移，不限制总帧数；连续缺少可见特征时减速外推，最多盲推 8 帧。
+12. 每个预测帧从原图同心红环提取靶心锚点，并仅平移已有四角结构；锚点可防止预测中心脱离真实靶纸。
 
-外推最多 12 帧，避免角点在靶纸移出画面后永久漂移。
+矩形部分可见时优先使用可见特征持续修正，可长期跟踪；只有连续失去特征时才盲推。完全离画后最多再外推 24 帧，避免永久漂移。
+
+稳定 `TRACK` 模式下，红环靶心每 5 帧完整刷新一次，中间仅使用新单应矩阵回投影校正图中已确认的靶心坐标。新锁定、周期重检和拟合失败时会立即刷新，保持目标切换和异常恢复能力。
 
 当 `TARGET_ACCEL_USE_CPP_LK=True` 且原生库可用时，上述 LK/RANSAC/四角投影链路会由 `vision/native/targetdetect_accel.cpp` 执行，Python 仅保留状态管理与兜底。
 
@@ -328,6 +356,8 @@ red_excess = red - max(green, blue)
 
 靶纸面积低于画面的 8% 且标准检测失败时，才额外使用较低的红色差值重试。第一次仍保持 40% 工作分辨率；若仍失败，再使用 55% 工作分辨率。近距离正常帧不会执行这些重试。
 
+只有画面中高亮低饱和区域占工作图至少 0.5%，且拟合 RMS 超过 3 px 或标准拟合失败时，才执行抗镜面反光兜底：排除高亮区域、降低红色差值阈值，并跳过被反光破坏、角度覆盖不足的圆环。至少三个可靠圆环通过几何和半径约束后才接受中心。普通锁定帧不执行该路径。
+
 暗红区域只有在常规拟合失败或 RMS 低置信时才计算：
 
 - 将图像转 HSV。
@@ -349,12 +379,12 @@ red_excess = red - max(green, blue)
 8. 按每个环的中位径向误差计算鲁棒 RMS，局部激光痕迹不会单独主导置信度；超过阈值标记低置信。
 9. 拒绝偏离靶纸几何中心超过 25 px 的圆心，防止圆环不完整时被局部红色轮廓错误锁定。
 
-如果轮廓拟合找到的有效半径少于三个，则尝试像素分类兜底；兜底继续检查五个理论半径处的像素和角度覆盖，否则返回“未找到”：
+如果轮廓拟合找到的有效半径少于三个，则尝试像素分类兜底。反光兜底允许个别圆环被完全遮断，但至少三个有效圆环必须分别拥有足够像素并覆盖至少六个角度扇区：
 
 - 将像素按理论环径向分组。
 - 对每个环采样最多 80 点。
-- 用椭圆拟合每环。
-- 使用中位数计算共有圆心。
+- 跳过点数不足或角度覆盖不足的环。
+- 用保留环执行共享圆心、独立半径的联合圆拟合。
 - 检查角度覆盖、半径误差和画面边界。
 
 只有快速轮廓拟合不足时才进入兜底，避免每帧进行高成本拟合。
@@ -422,7 +452,7 @@ red_excess = red - max(green, blue)
 
 屏幕展示已经简化为上下状态栏：
 
-屏幕默认每 3 帧更新一次；图像检测、跟踪和串口处理仍逐帧运行。该设置用于减少同步显示提交对主循环的阻塞，不改变识别频率或拟合精度。
+屏幕默认每 10 帧更新一次；图像检测、跟踪和串口处理仍逐帧运行。该设置用于减少同步显示提交对主循环的阻塞，不改变识别频率或拟合精度。FPS 使用最近 0.5 秒窗口的平均值，避免单次 `disp.show()` 阻塞将瞬时 FPS 显示拉到 1–2。
 
 顶部状态栏：
 
@@ -443,6 +473,7 @@ red_excess = red - max(green, blue)
 
 - `FRAME LOCKED`：周期重检或最新四角有效。
 - `FRAME TRACKED`：由 LK 光流维持四角。
+- `FRAME PREDICT`：四角出画或 LK 暂时失效，由速度模型外推完整矩形。
 - `FRAME LOST`：角点完全丢失。
 - `RMS`：红环拟合残差，单位 px；绿色为 `OK`，橙色为低置信，`--` 表示无拟合结果。
 - `LIGHT ON/OFF`：补光灯状态。
@@ -578,7 +609,7 @@ red_excess = red - max(green, blue)
   -> 靶框重检成功：初始化光流
   -> LK 正常：TRACKED
   -> LK 失败：PREDICT
-  -> 超过 12 帧或状态失效：LOST
+  -> 完全离画超过 24 帧或状态失效：LOST
   -> LOST 后重新全图重检
 ```
 
@@ -586,6 +617,7 @@ red_excess = red - max(green, blue)
 
 - `FRAME LOCKED`：本帧得到重检或有效角点。
 - `FRAME TRACKED`：角点来自 LK。
+- `FRAME PREDICT`：角点由速度模型外推。
 - `FRAME LOST`：角点不可用。
 
 异常候选会先进入待验证状态，连续一致两次后才更新角点。
@@ -693,12 +725,12 @@ red_excess = red - max(green, blue)
 - RANSAC 内点比例至少 75%。
 - 四角面积不能变化超过设定范围。
 - 每角逐帧位移不能超过设定阈值。
-- LK 失败最多外推 12 帧。
+- 预测矩形部分可见时不限制外推帧数；完全离画后最多外推 24 帧。
 
 ### 靶心约束
 
 - 优先要求至少三个可靠红环。
-- 每环角度覆盖至少 6 个扇区。
+- 每个参与拟合的环至少覆盖 6 个扇区；被反光破坏的环可跳过。
 - 半径误差不能超过最大允许误差。
 - 靶心必须落在校正图范围内。
 - RMS 超过 5 px 标记低置信。

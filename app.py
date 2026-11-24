@@ -12,10 +12,11 @@ from common.config import (
     CAMERA_FPS,
     CAMERA_HEIGHT,
     CAMERA_WIDTH,
-    CORNER_DETECT_INTERVAL,
+    CENTER_REFRESH_INTERVAL,
     CORNER_TRACK_SCALE,
     DISPLAY_UPDATE_INTERVAL,
     FAR_TARGET_AREA_RATIO,
+    FPS_WINDOW_SECONDS,
     GIMBAL_CENTER_X,
     GIMBAL_CENTER_Y,
     GIMBAL_DEADBAND_PX,
@@ -61,7 +62,10 @@ from common.console_output import print_status
 from control.gimbal_pid import TwoAxisGimbalPID
 from vision.kalman import TargetKalman
 from vision.lighting import update_fill_light
-from vision.target_center import detect_target_center
+from vision.target_center import (
+    detect_raw_target_center,
+    detect_target_center,
+)
 from control.serial_sender import TargetSerialSender
 from vision.target_frame import (
     TargetCornerTracker,
@@ -279,10 +283,16 @@ def main():
     last_time = time.monotonic()
     last_timing_print = time.monotonic()
     last_uart_send = time.monotonic()
+    fps_window_start = time.monotonic()
+    fps_window_frames = 0
+    fps = float(CAMERA_FPS)
 
     frame_count = 0
     tracking_roi = (0, 0, CAMERA_WIDTH, CAMERA_HEIGHT)
     corner_tracker = TargetCornerTracker()
+    cached_center_rectified = None
+    cached_fit_rms = None
+    cached_fit_status = "frame not found"
 
     print_status(
         "APP",
@@ -340,11 +350,13 @@ def main():
         corners = None
         corners_tracked = False
         roi_x1, roi_y1, roi_x2, roi_y2 = tracking_roi
-        detect_corners = (
-            not corner_tracker.is_active
-            or corner_tracker.frames_since_detection >= CORNER_DETECT_INTERVAL
-        )
+        detect_corners = corner_tracker.needs_redetection(frame_count)
         corner_mode = "DETECT" if detect_corners else "TRACK"
+        prediction_anchor = (
+            detect_raw_target_center(frame)
+            if corner_tracker.is_predicted
+            else None
+        )
 
         if detect_corners:
             roi_frame = frame[roi_y1:roi_y2, roi_x1:roi_x2]
@@ -369,15 +381,31 @@ def main():
             accepted_corners = corner_tracker.initialize(frame, corners)
             if accepted_corners is not None:
                 corners = accepted_corners
+            elif corner_tracker.is_active:
+                corners = corner_tracker.update(
+                    frame,
+                    center_anchor=prediction_anchor
+                )
+                corners_tracked = corners is not None
+                corner_mode = "DETECT+TRACK"
+                if corner_tracker.is_predicted:
+                    corner_mode = "DETECT+PREDICT"
         else:
-            if detect_corners:
+            if detect_corners and not corner_tracker.is_predicted:
                 tracking_roi = (0, 0, CAMERA_WIDTH, CAMERA_HEIGHT)
             if corner_tracker.is_active:
-                corners = corner_tracker.update(frame)
+                corners = corner_tracker.update(
+                    frame,
+                    center_anchor=prediction_anchor
+                )
                 corners_tracked = corners is not None
                 predicted = corner_tracker.is_predicted
                 if detect_corners:
-                    corner_mode = "DETECT+TRACK"
+                    corner_mode = (
+                        "DETECT+PREDICT"
+                        if predicted
+                        else "DETECT+TRACK"
+                    )
                 elif predicted:
                     corner_mode = "PREDICT"
 
@@ -390,6 +418,7 @@ def main():
         center_rectified = None
         fit_rms = None
         fit_status = "frame not found"
+        center_refreshed = False
 
         if corners is not None:
 
@@ -401,47 +430,74 @@ def main():
             H = make_homography(
                 corners
             )
-
-            rectified = rectify_image(
-                frame,
-                H
+            module_times["target_frame"] += (
+                time.monotonic() - stage_start
             )
-            module_times["target_frame"] += time.monotonic() - stage_start
-
             target_area_ratio = (
                 abs(cv2.contourArea(corners.astype(np.float32)))
                 / float(CAMERA_WIDTH * CAMERA_HEIGHT)
             )
+            distant = target_area_ratio <= FAR_TARGET_AREA_RATIO
 
-            # ------------------------------------------------
-            # 提取红色圆环并拟合靶心
-            # ------------------------------------------------
-
-            stage_start = time.monotonic()
-            (
-                center_rectified,
-                fit_rms,
-                _,
-                _,
-                fit_status,
-                _
-            ) = detect_target_center(
-                rectified,
-                distant=target_area_ratio <= FAR_TARGET_AREA_RATIO
-            )
-            module_times["target_center"] += time.monotonic() - stage_start
-
-            if center_rectified is not None:
-                # 转回原始相机坐标
-                stage_start = time.monotonic()
-                center_camera = rectified_to_camera(
-                    center_rectified,
-                    H
-                )
-                module_times["target_frame"] += time.monotonic() - stage_start
-            else:
+            if corner_tracker.is_predicted:
                 center_camera = target_frame_center_to_camera(H)
                 fit_status = "frame center fallback"
+            else:
+                refresh_center = (
+                    cached_center_rectified is None
+                    or frame_count % CENTER_REFRESH_INTERVAL == 0
+                    or not corners_tracked
+                    or cached_fit_status != "OK"
+                )
+                if refresh_center:
+                    center_refreshed = True
+                    stage_start = time.monotonic()
+                    rectified = rectify_image(frame, H)
+                    module_times["target_frame"] += (
+                        time.monotonic() - stage_start
+                    )
+
+                    stage_start = time.monotonic()
+                    (
+                        measured_center_rectified,
+                        measured_fit_rms,
+                        _,
+                        _,
+                        measured_fit_status,
+                        _
+                    ) = detect_target_center(
+                        rectified,
+                        distant=distant
+                    )
+                    module_times["target_center"] += (
+                        time.monotonic() - stage_start
+                    )
+                    if measured_center_rectified is not None:
+                        cached_center_rectified = measured_center_rectified
+                        cached_fit_rms = measured_fit_rms
+                        cached_fit_status = measured_fit_status
+                    elif (
+                        cached_center_rectified is not None
+                        and cached_fit_status == "OK"
+                    ):
+                        measured_fit_status = cached_fit_status
+
+                center_rectified = cached_center_rectified
+                fit_rms = cached_fit_rms
+                fit_status = cached_fit_status
+
+                if center_rectified is not None:
+                    stage_start = time.monotonic()
+                    center_camera = rectified_to_camera(
+                        center_rectified,
+                        H
+                    )
+                    module_times["target_frame"] += (
+                        time.monotonic() - stage_start
+                    )
+                else:
+                    center_camera = target_frame_center_to_camera(H)
+                    fit_status = "frame center fallback"
 
         if corners is not None:
             tracking_center = (
@@ -540,15 +596,23 @@ def main():
 
         frame_count += 1
 
-        elapsed = time.monotonic() - loop_start
-        fps = 1.0 / elapsed if elapsed > 0 else 0.0
+        fps_window_now = time.monotonic()
+        fps_window_frames += 1
+        fps_window_elapsed = fps_window_now - fps_window_start
+        if fps_window_elapsed >= FPS_WINDOW_SECONDS:
+            fps = fps_window_frames / fps_window_elapsed
+            fps_window_frames = 0
+            fps_window_start = fps_window_now
 
         vis = frame
         display_updated = (
             (frame_count - 1) % DISPLAY_UPDATE_INTERVAL == 0
         )
         if display_updated:
-            if corners_tracked:
+            if corner_tracker.is_predicted:
+                frame_status = "FRAME PREDICT"
+                frame_color = (0, 165, 255)
+            elif corners_tracked:
                 frame_status = "FRAME TRACKED"
                 frame_color = (0, 165, 255)
             elif corners is not None:
@@ -644,6 +708,7 @@ def main():
                     else None
                 ),
                 "display_updated": display_updated,
+                "center_refreshed": center_refreshed,
                 "corner_features": (
                     len(corner_tracker.previous_points)
                     if corner_tracker.previous_points is not None
@@ -654,7 +719,7 @@ def main():
                     for name, elapsed in module_times.items()
                 },
                 "total_ms": round(total_seconds * 1000.0, 3),
-                "fps": round(1.0 / total_seconds, 2) if total_seconds > 0 else 0.0,
+                "fps": round(fps, 2),
             }
             print_status(
                 "TIMING",
@@ -664,6 +729,7 @@ def main():
                 fit_status=fit_status,
                 fit_rms=fit_rms,
                 display_updated=display_updated,
+                center_refreshed=timing_report["center_refreshed"],
                 corner_features=timing_report["corner_features"],
                 camera_io_ms=timing_report["modules_ms"]["camera_io"],
                 target_frame_ms=timing_report["modules_ms"]["target_frame"],

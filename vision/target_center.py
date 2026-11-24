@@ -20,6 +20,21 @@ from common.config import (
     MAX_RADIUS_ERROR,
     RECT_HEIGHT,
     RECT_WIDTH,
+    REFLECTION_GLARE_MAX_SATURATION,
+    REFLECTION_GLARE_MIN_AREA_RATIO,
+    REFLECTION_GLARE_MIN_VALUE,
+    REFLECTION_MIN_RING_POINTS,
+    REFLECTION_MIN_VALID_RINGS,
+    REFLECTION_CENTER_MAX_DRIFT_PX,
+    REFLECTION_RED_EXCESS_THRESHOLD,
+    REFLECTION_RETRY_RMS_THRESHOLD,
+    REFLECTION_RMS_COMPARISON_TOLERANCE,
+    REFLECTION_CENTER_IMPROVEMENT_PX,
+    REFLECTION_WEAK_RED_EXCESS_THRESHOLD,
+    RAW_CENTER_CLUSTER_PX,
+    RAW_CENTER_DETECT_SCALE,
+    RAW_CENTER_MIN_CANDIDATES,
+    RAW_CENTER_RED_THRESHOLD,
     RED_CLOSE_KERNEL,
     RED_HSV_HIGH1,
     RED_HSV_HIGH2,
@@ -36,6 +51,140 @@ from vision.native_backend import get_native_backend
 _NATIVE_BACKEND = get_native_backend()
 
 CANDIDATE_SCORE_MAX_POINTS = 16
+
+
+def extract_glare_mask(rectified):
+    hsv = cv2.cvtColor(
+        rectified,
+        cv2.COLOR_BGR2HSV
+    )
+    return cv2.inRange(
+        hsv,
+        np.array(
+            [0, 0, REFLECTION_GLARE_MIN_VALUE],
+            dtype=np.uint8
+        ),
+        np.array(
+            [180, REFLECTION_GLARE_MAX_SATURATION, 255],
+            dtype=np.uint8
+        )
+    )
+
+
+def detect_raw_target_center(frame):
+    height, width = frame.shape[:2]
+    if height <= 0 or width <= 0:
+        return None
+
+    analysis_width = max(1, int(round(width * RAW_CENTER_DETECT_SCALE)))
+    analysis_height = max(1, int(round(height * RAW_CENTER_DETECT_SCALE)))
+    analysis = cv2.resize(
+        frame,
+        (analysis_width, analysis_height),
+        interpolation=cv2.INTER_AREA
+    )
+    blue = analysis[:, :, 0]
+    green = analysis[:, :, 1]
+    red = analysis[:, :, 2]
+    red_excess = cv2.subtract(
+        red,
+        cv2.max(green, blue)
+    )
+    _, mask = cv2.threshold(
+        red_excess,
+        RAW_CENTER_RED_THRESHOLD,
+        255,
+        cv2.THRESH_BINARY
+    )
+    mask = cv2.bitwise_and(
+        mask,
+        cv2.bitwise_not(extract_glare_mask(analysis))
+    )
+    mask = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_CLOSE,
+        RED_CLOSE_KERNEL,
+        iterations=1
+    )
+
+    contours, _ = cv2.findContours(
+        mask,
+        cv2.RETR_LIST,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+    scale_x = width / float(analysis_width)
+    scale_y = height / float(analysis_height)
+    candidates = []
+    for contour in contours:
+        if len(contour) < 8:
+            continue
+        (center_x, center_y), (axis_a, axis_b), _ = cv2.fitEllipse(
+            contour
+        )
+        min_axis = min(axis_a, axis_b)
+        if min_axis < 4.0:
+            continue
+        axis_ratio = max(axis_a, axis_b) / min_axis
+        radius = (axis_a + axis_b) / 4.0
+        if radius < 6.0 or axis_ratio > 2.2:
+            continue
+        candidates.append((
+            np.asarray(
+                [
+                    center_x * scale_x,
+                    center_y * scale_y
+                ],
+                dtype=np.float32
+            ),
+            radius * (scale_x + scale_y) * 0.5
+        ))
+
+    if len(candidates) < RAW_CENTER_MIN_CANDIDATES:
+        return None
+
+    best_cluster = []
+    best_score = None
+    for center, radius in candidates:
+        cluster = [
+            candidate
+            for candidate in candidates
+            if np.linalg.norm(
+                candidate[0] - center
+            ) <= RAW_CENTER_CLUSTER_PX
+        ]
+        if len(cluster) < RAW_CENTER_MIN_CANDIDATES:
+            continue
+        radius_bins = {
+            int(round(candidate[1] / 10.0))
+            for candidate in cluster
+        }
+        score = (
+            len(radius_bins),
+            len(cluster)
+        )
+        if (
+            len(radius_bins) >= 2
+            and (
+                best_score is None
+                or score > best_score
+            )
+        ):
+            best_score = score
+            best_cluster = cluster
+
+    if not best_cluster:
+        return None
+    center = np.median(
+        np.asarray(
+            [candidate[0] for candidate in best_cluster],
+            dtype=np.float32
+        ),
+        axis=0
+    )
+    return (
+        float(center[0]),
+        float(center[1])
+    )
 
 
 def extract_red_mask(rectified, red_excess_threshold=8):
@@ -61,6 +210,18 @@ def extract_red_mask(rectified, red_excess_threshold=8):
         scene_value,
         RED_LOW_LIGHT_MIN_VALUE,
         0
+    )
+
+
+def extract_reflection_red_mask(rectified, red_excess_threshold):
+    red_mask, _ = extract_red_mask(
+        rectified,
+        red_excess_threshold=red_excess_threshold
+    )
+    glare_mask = extract_glare_mask(rectified)
+    return cv2.bitwise_and(
+        red_mask,
+        cv2.bitwise_not(glare_mask)
     )
 
 
@@ -184,6 +345,73 @@ def collect_ring_points(
         groups.append(points)
 
     return groups, None
+
+
+def _collect_available_ring_points(
+    center,
+    pixel_coordinates,
+    expected_radii,
+    search_tolerance,
+    min_points
+):
+    xs, ys = pixel_coordinates
+    if len(xs) == 0:
+        return [], [], ["empty red mask"]
+
+    cx, cy = center
+    dx = np.asarray(xs, dtype=np.float32) - cx
+    dy = np.asarray(ys, dtype=np.float32) - cy
+    squared_distances = dx * dx + dy * dy
+    groups = []
+    ring_indices = []
+    failures = []
+
+    for ring_index, expected_radius in enumerate(expected_radii):
+        inner_radius = expected_radius - search_tolerance
+        outer_radius = expected_radius + search_tolerance
+        valid = (
+            (squared_distances >= inner_radius * inner_radius)
+            & (squared_distances <= outer_radius * outer_radius)
+        )
+        points = np.column_stack((
+            xs[valid],
+            ys[valid]
+        )).astype(np.float64)
+
+        if len(points) < min_points:
+            failures.append(
+                "ring {}: {} px".format(
+                    ring_index + 1,
+                    len(points)
+                )
+            )
+            continue
+        if not check_angular_coverage([points], center):
+            failures.append(
+                "ring {}: poor angular coverage".format(
+                    ring_index + 1
+                )
+            )
+            continue
+
+        if len(points) > MAX_POINTS_PER_RING:
+            angles = np.arctan2(
+                points[:, 1] - cy,
+                points[:, 0] - cx
+            )
+            angle_order = np.argsort(angles)
+            sample_indices = np.linspace(
+                0,
+                len(angle_order) - 1,
+                MAX_POINTS_PER_RING,
+                dtype=np.int32
+            )
+            points = points[angle_order[sample_indices]]
+
+        groups.append(points)
+        ring_indices.append(ring_index)
+
+    return groups, ring_indices, failures
 
 
 def joint_circle_fit(groups, scale_x=1.0, scale_y=1.0):
@@ -426,36 +654,34 @@ def _fit_target_center_pixels(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
         initial_centers = (paper_center,)
 
     for initial_center in initial_centers:
-        groups, failure = collect_ring_points(
-            mask,
-            initial_center,
-            pixel_coordinates,
-            expected_radii=expected_radii,
-            search_tolerance=RING_SEARCH_TOLERANCE * scale
+        groups, ring_indices, failures = (
+            _collect_available_ring_points(
+                initial_center,
+                pixel_coordinates,
+                expected_radii=expected_radii,
+                search_tolerance=RING_SEARCH_TOLERANCE * scale,
+                min_points=REFLECTION_MIN_RING_POINTS
+            )
         )
 
-        if groups is None:
+        if len(groups) < REFLECTION_MIN_VALID_RINGS:
             failure_reason = (
-                failure if failure is not None else "circle fit failed"
+                failures[0]
+                if failures
+                else "insufficient valid rings"
             )
             continue
 
-        ring_centers = []
-        radii = []
-
-        for points in groups:
-            ellipse = cv2.fitEllipse(
-                points.astype(np.float32).reshape(-1, 1, 2)
-            )
-            (ring_cx, ring_cy), (axis_a, axis_b), _ = ellipse
-            ring_centers.append((ring_cx, ring_cy))
-            radii.append((axis_a + axis_b) / 4.0)
-
-        center_array = np.median(
-            np.asarray(ring_centers, dtype=np.float64),
-            axis=0
+        joint_fit = joint_circle_fit(
+            groups,
+            scale_x,
+            scale_y
         )
-        center = (float(center_array[0]), float(center_array[1]))
+        if joint_fit is None:
+            failure_reason = "joint circle fit failed"
+            continue
+        center = joint_fit[:2]
+        radii = joint_fit[2]
 
         if not check_angular_coverage(groups, center):
             failure_reason = "poor ring coverage"
@@ -465,13 +691,17 @@ def _fit_target_center_pixels(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
 
         if CHECK_RING_RADIUS:
             invalid_radius = None
-            for ring_index, (fitted_radius, expected_radius) in enumerate(zip(
+            for source_ring_index, fitted_radius, expected_radius in zip(
+                ring_indices,
                 radii,
-                expected_radii
-            )):
+                [
+                    expected_radii[index]
+                    for index in ring_indices
+                ]
+            ):
                 if abs(fitted_radius - expected_radius) > MAX_RADIUS_ERROR * scale:
                     invalid_radius = "ring {} radius {:.1f}".format(
-                        ring_index + 1,
+                        source_ring_index + 1,
                         fitted_radius
                     )
                     break
@@ -560,6 +790,19 @@ def fit_target_center(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
                 ) <= CENTER_MAX_OFFSET_PX
             ):
                 return center, rms, radii, fit_status
+
+    direct_result = _fit_target_center_pixels(
+        mask,
+        scale_x,
+        scale_y
+    )
+    direct_center, direct_rms, direct_radii, direct_status = direct_result
+    if (
+        direct_center is not None
+        and direct_rms is not None
+        and direct_status == "OK"
+    ):
+        return direct_center, direct_rms, direct_radii, direct_status
 
     scale = (scale_x + scale_y) / 2.0
     contours, _ = cv2.findContours(
@@ -694,8 +937,14 @@ def detect_target_center(rectified, distant=False):
     计算靶心；远距离标准掩膜失败时增加低反差圆环重试。
     """
 
-    process_width = max(1, int(round(rectified.shape[1] * CENTER_DETECT_SCALE)))
-    process_height = max(1, int(round(rectified.shape[0] * CENTER_DETECT_SCALE)))
+    process_width = max(
+        1,
+        int(round(rectified.shape[1] * CENTER_DETECT_SCALE))
+    )
+    process_height = max(
+        1,
+        int(round(rectified.shape[0] * CENTER_DETECT_SCALE))
+    )
     process_image = cv2.resize(
         rectified,
         (process_width, process_height),
@@ -752,14 +1001,37 @@ def detect_target_center(rectified, distant=False):
                 selected_mask = expanded_mask
                 low_light_used = True
 
-    if (
+    needs_reflection_check = (
+        center is None
+        or rms is None
+        or rms > REFLECTION_RETRY_RMS_THRESHOLD
+    )
+    reflection_detected = False
+    if needs_reflection_check:
+        glare_mask = extract_glare_mask(process_image)
+        reflection_detected = (
+            cv2.countNonZero(glare_mask)
+            >= max(
+                1,
+                int(
+                    glare_mask.size
+                    * REFLECTION_GLARE_MIN_AREA_RATIO
+                )
+            )
+        )
+    reflection_retry_needed = (
+        needs_reflection_check
+        and reflection_detected
+    )
+    distant_retry_needed = (
         distant
         and (
             center is None
             or rms is None
             or rms > FIT_RMS_WARNING_THRESHOLD
         )
-    ):
+    )
+    if reflection_retry_needed or distant_retry_needed:
         scaled_images = {
             CENTER_DETECT_SCALE: (
                 process_image,
@@ -767,11 +1039,26 @@ def detect_target_center(rectified, distant=False):
                 scale_y
             )
         }
-        retry_options = (
-            (CENTER_DETECT_SCALE, FAR_RED_EXCESS_THRESHOLD),
-            (FAR_CENTER_DETECT_SCALE, FAR_RED_EXCESS_THRESHOLD),
-            (FAR_CENTER_DETECT_SCALE, FAR_WEAK_RED_EXCESS_THRESHOLD)
-        )
+        retry_options = ()
+        if reflection_retry_needed:
+            retry_options += (
+                (CENTER_DETECT_SCALE, REFLECTION_RED_EXCESS_THRESHOLD),
+                (
+                    CENTER_DETECT_SCALE,
+                    REFLECTION_WEAK_RED_EXCESS_THRESHOLD
+                )
+            )
+        if distant_retry_needed:
+            retry_options += (
+                (
+                    FAR_CENTER_DETECT_SCALE,
+                    FAR_RED_EXCESS_THRESHOLD
+                ),
+                (
+                    FAR_CENTER_DETECT_SCALE,
+                    FAR_WEAK_RED_EXCESS_THRESHOLD
+                )
+            )
 
         for retry_scale, red_threshold in retry_options:
             if retry_scale not in scaled_images:
@@ -797,10 +1084,16 @@ def detect_target_center(rectified, distant=False):
             retry_image, retry_scale_x, retry_scale_y = (
                 scaled_images[retry_scale]
             )
-            retry_mask, _ = extract_red_mask(
-                retry_image,
-                red_excess_threshold=red_threshold
-            )
+            if reflection_retry_needed:
+                retry_mask = extract_reflection_red_mask(
+                    retry_image,
+                    red_threshold
+                )
+            else:
+                retry_mask, _ = extract_red_mask(
+                    retry_image,
+                    red_excess_threshold=red_threshold
+                )
             retry_center, retry_rms, retry_radii, retry_status = (
                 fit_target_center(
                     retry_mask,
@@ -808,22 +1101,48 @@ def detect_target_center(rectified, distant=False):
                     retry_scale_y
                 )
             )
+            retry_selected = False
             if (
                 retry_center is not None
                 and retry_rms is not None
-                and (
-                    center is None
-                    or rms is None
-                    or retry_rms < rms
-                )
             ):
-                center = retry_center
-                rms = retry_rms
-                radii = retry_radii
-                fit_status = retry_status
-                selected_mask = retry_mask
+                retry_offset = math.hypot(
+                    retry_center[0] - (RECT_WIDTH - 1) / 2.0,
+                    retry_center[1] - (RECT_HEIGHT - 1) / 2.0
+                )
+                if center is None or rms is None:
+                    should_select = True
+                else:
+                    current_offset = math.hypot(
+                        center[0] - (RECT_WIDTH - 1) / 2.0,
+                        center[1] - (RECT_HEIGHT - 1) / 2.0
+                    )
+                    should_select = (
+                        (
+                            retry_rms
+                            <= rms + REFLECTION_RMS_COMPARISON_TOLERANCE
+                            and retry_offset
+                            < current_offset
+                            - REFLECTION_CENTER_IMPROVEMENT_PX
+                        )
+                        or (
+                            retry_rms
+                            < rms - REFLECTION_RMS_COMPARISON_TOLERANCE
+                            and retry_offset
+                            <= current_offset
+                            + REFLECTION_CENTER_MAX_DRIFT_PX
+                        )
+                    )
 
-            if fit_status == "OK":
+                if should_select:
+                    center = retry_center
+                    rms = retry_rms
+                    radii = retry_radii
+                    fit_status = retry_status
+                    selected_mask = retry_mask
+                    retry_selected = True
+
+            if retry_selected and fit_status == "OK":
                 break
 
     red_low_light_info = (

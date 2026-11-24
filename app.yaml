@@ -5,25 +5,26 @@ author: du
 icon: app.png
 desc: 靶心解算
 files:
+  - common\__init__.py
+  - common\config.py
+  - common\console_output.py
+  - control\__init__.py
+  - control\camera_attitude.py
+  - control\gimbal_pid.py
+  - control\serial_sender.py
+  - >-
+    vision\native\maixcdk_project\components\targetdetect_accel\src\targetdetect_accel.cpp
+  - vision\native\maixcdk_project\components\targetdetect_accel\CMakeLists.txt
+  - vision\native\maixcdk_project\main\src\main.cpp
+  - vision\native\maixcdk_project\main\CMakeLists.txt
+  - vision\native\maixcdk_project\app.yaml
+  - vision\native\build_with_maixcdk.sh
+  - vision\native\targetdetect_accel.cpp
+  - vision\__init__.py
+  - vision\kalman.py
+  - vision\lighting.py
+  - vision\native_backend.py
+  - vision\target_center.py
+  - vision\target_frame.py
   - app.py
-  - control/camera_attitude.py
-  - common/config.py
-  - common/console_output.py
-  - control/gimbal_pid.py
-  - vision/kalman.py
-  - vision/lighting.py
   - main.py
-  - control/serial_sender.py
-  - vision/target_center.py
-  - vision/target_frame.py
-  - vision/native_backend.py
-  - vision/native/targetdetect_accel.cpp
-  - vision/native/build_with_maixcdk.sh
-  - vision/native/maixcdk_project/app.yaml
-  - vision/native/maixcdk_project/main/CMakeLists.txt
-  - vision/native/maixcdk_project/main/src/main.cpp
-  - vision/native/maixcdk_project/components/targetdetect_accel/CMakeLists.txt
-  - vision/native/maixcdk_project/components/targetdetect_accel/src/targetdetect_accel.cpp
-  - common/__init__.py
-  - vision/__init__.py
-  - control/__init__.py
