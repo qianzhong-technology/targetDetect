@@ -12,11 +12,9 @@ from common.config import (
     CAMERA_FPS,
     CAMERA_HEIGHT,
     CAMERA_WIDTH,
-    CENTER_REFRESH_INTERVAL,
     CORNER_TRACK_SCALE,
     DISPLAY_UPDATE_INTERVAL,
     FAR_TARGET_AREA_RATIO,
-    FPS_WINDOW_SECONDS,
     GIMBAL_CENTER_X,
     GIMBAL_CENTER_Y,
     GIMBAL_DEADBAND_PX,
@@ -283,16 +281,10 @@ def main():
     last_time = time.monotonic()
     last_timing_print = time.monotonic()
     last_uart_send = time.monotonic()
-    fps_window_start = time.monotonic()
-    fps_window_frames = 0
-    fps = float(CAMERA_FPS)
 
     frame_count = 0
     tracking_roi = (0, 0, CAMERA_WIDTH, CAMERA_HEIGHT)
     corner_tracker = TargetCornerTracker()
-    cached_center_rectified = None
-    cached_fit_rms = None
-    cached_fit_status = "frame not found"
 
     print_status(
         "APP",
@@ -413,16 +405,11 @@ def main():
         if corners is None:
             corner_mode = "LOST"
             tracking_roi = (0, 0, CAMERA_WIDTH, CAMERA_HEIGHT)
-            if not corner_tracker.is_active:
-                cached_center_rectified = None
-                cached_fit_rms = None
-                cached_fit_status = "frame not found"
 
         center_camera = None
         center_rectified = None
         fit_rms = None
         fit_status = "frame not found"
-        center_refreshed = False
 
         if corners is not None:
 
@@ -434,73 +421,38 @@ def main():
             H = make_homography(
                 corners
             )
-            module_times["target_frame"] += (
-                time.monotonic() - stage_start
-            )
-            target_area_ratio = (
-                abs(cv2.contourArea(corners.astype(np.float32)))
-                / float(CAMERA_WIDTH * CAMERA_HEIGHT)
-            )
-            distant = target_area_ratio <= FAR_TARGET_AREA_RATIO
 
             if corner_tracker.is_predicted:
-                if (
-                    cached_center_rectified is not None
-                    and cached_fit_status == "OK"
-                ):
-                    center_rectified = cached_center_rectified
-                    fit_rms = cached_fit_rms
-                    fit_status = "predicted cached center"
-                    center_camera = rectified_to_camera(
-                        center_rectified,
-                        H
-                    )
-                else:
-                    center_camera = target_frame_center_to_camera(H)
-                    fit_status = "frame center fallback"
+                module_times["target_frame"] += time.monotonic() - stage_start
+                center_camera = target_frame_center_to_camera(H)
+                fit_status = "frame center fallback"
             else:
-                refresh_center = (
-                    cached_center_rectified is None
-                    or frame_count % CENTER_REFRESH_INTERVAL == 0
-                    or not corners_tracked
-                    or cached_fit_status != "OK"
+                rectified = rectify_image(
+                    frame,
+                    H
                 )
-                if refresh_center:
-                    center_refreshed = True
-                    stage_start = time.monotonic()
-                    rectified = rectify_image(frame, H)
-                    module_times["target_frame"] += (
-                        time.monotonic() - stage_start
-                    )
+                module_times["target_frame"] += time.monotonic() - stage_start
 
-                    stage_start = time.monotonic()
-                    (
-                        measured_center_rectified,
-                        measured_fit_rms,
-                        _,
-                        _,
-                        measured_fit_status,
-                        _
-                    ) = detect_target_center(
-                        rectified,
-                        distant=distant
-                    )
-                    module_times["target_center"] += (
-                        time.monotonic() - stage_start
-                    )
-                    if measured_center_rectified is not None:
-                        cached_center_rectified = measured_center_rectified
-                        cached_fit_rms = measured_fit_rms
-                        cached_fit_status = measured_fit_status
-                    elif (
-                        cached_center_rectified is not None
-                        and cached_fit_status == "OK"
-                    ):
-                        measured_fit_status = cached_fit_status
+                target_area_ratio = (
+                    abs(cv2.contourArea(corners.astype(np.float32)))
+                    / float(CAMERA_WIDTH * CAMERA_HEIGHT)
+                )
 
-                center_rectified = cached_center_rectified
-                fit_rms = cached_fit_rms
-                fit_status = cached_fit_status
+                stage_start = time.monotonic()
+                (
+                    center_rectified,
+                    fit_rms,
+                    _,
+                    _,
+                    fit_status,
+                    _
+                ) = detect_target_center(
+                    rectified,
+                    distant=target_area_ratio <= FAR_TARGET_AREA_RATIO
+                )
+                module_times["target_center"] += (
+                    time.monotonic() - stage_start
+                )
 
                 if center_rectified is not None:
                     stage_start = time.monotonic()
@@ -542,12 +494,7 @@ def main():
         target_status_color = (0, 0, 255)
         target_point = None
 
-        if corner_tracker.is_predicted and center_camera is not None:
-            target_status = "PREDICTING"
-            target_status_color = (0, 165, 255)
-            target_point = (center_camera[0], center_camera[1])
-
-        elif center_camera is not None and fit_status == "OK":
+        if center_camera is not None and fit_status == "OK":
             stage_start = time.monotonic()
             kalman.update(
                 center_camera,
@@ -617,13 +564,8 @@ def main():
 
         frame_count += 1
 
-        fps_window_now = time.monotonic()
-        fps_window_frames += 1
-        fps_window_elapsed = fps_window_now - fps_window_start
-        if fps_window_elapsed >= FPS_WINDOW_SECONDS:
-            fps = fps_window_frames / fps_window_elapsed
-            fps_window_frames = 0
-            fps_window_start = fps_window_now
+        elapsed = time.monotonic() - loop_start
+        fps = 1.0 / elapsed if elapsed > 0 else 0.0
 
         vis = frame
         display_updated = (
@@ -729,7 +671,6 @@ def main():
                     else None
                 ),
                 "display_updated": display_updated,
-                "center_refreshed": center_refreshed,
                 "corner_features": (
                     len(corner_tracker.previous_points)
                     if corner_tracker.previous_points is not None
@@ -740,7 +681,7 @@ def main():
                     for name, elapsed in module_times.items()
                 },
                 "total_ms": round(total_seconds * 1000.0, 3),
-                "fps": round(fps, 2),
+                "fps": round(1.0 / total_seconds, 2) if total_seconds > 0 else 0.0,
             }
             print_status(
                 "TIMING",
@@ -750,7 +691,6 @@ def main():
                 fit_status=fit_status,
                 fit_rms=fit_rms,
                 display_updated=display_updated,
-                center_refreshed=timing_report["center_refreshed"],
                 corner_features=timing_report["corner_features"],
                 camera_io_ms=timing_report["modules_ms"]["camera_io"],
                 target_frame_ms=timing_report["modules_ms"]["target_frame"],

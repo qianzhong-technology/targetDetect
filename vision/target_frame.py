@@ -14,12 +14,10 @@ from common.config import (
     CORNER_TRACK_MIN_FEATURES,
     CORNER_DETECT_INTERVAL,
     CORNER_TRACK_REFRESH_FEATURES,
-    CORNER_TRACK_HOMOGRAPHY_INTERVAL,
-    CORNER_TRACK_AFFINE_MAX_MEDIAN_RESIDUAL,
-    CORNER_TRACK_AFFINE_MAX_RESIDUAL,
     CORNER_TRACK_MAX_OFFSCREEN_FRAMES,
     CORNER_LOST_DETECT_INTERVAL,
     CORNER_PREDICT_DETECT_INTERVAL,
+    CORNER_TRACK_VISIBLE_BLIND_FRAMES,
     CORNER_TRACK_PREDICTION_VELOCITY_DECAY,
     CORNER_TRACK_CENTER_ANCHOR_MAX_CORRECTION_PX,
     CORNER_TRACK_MOTION_THRESHOLD_PX,
@@ -305,11 +303,11 @@ class TargetCornerTracker:
         self.corner_velocity: Optional[np.ndarray] = None
         self.predicted_frames = 0
         self.offscreen_predicted_frames = 0
+        self.blind_prediction_frames = 0
         self.track_width: Optional[int] = None
         self.track_height: Optional[int] = None
         self.pending_corners: Optional[np.ndarray] = None
         self.pending_hits = 0
-        self.frames_since_homography = 0
         self.clear()
 
     @property
@@ -348,14 +346,13 @@ class TargetCornerTracker:
         self.corner_velocity = None
         self.predicted_frames = 0
         self.offscreen_predicted_frames = 0
+        self.blind_prediction_frames = 0
         self.track_width = None
         self.track_height = None
         self.pending_corners = None
         self.pending_hits = 0
-        self.frames_since_homography = 0
         self.frames_since_detection = 0
         self.failures = 0
-        self.frames_since_homography = 0
 
     @staticmethod
     def _find_features(gray, corners):
@@ -506,6 +503,7 @@ class TargetCornerTracker:
             self.corner_velocity = np.zeros((4, 2), dtype=np.float32)
         self.predicted_frames = 0
         self.offscreen_predicted_frames = 0
+        self.blind_prediction_frames = 0
         self.track_width = gray.shape[1]
         self.track_height = gray.shape[0]
         self.previous_gray = gray
@@ -527,8 +525,15 @@ class TargetCornerTracker:
                 self.predicted_corners + self.corner_velocity
             ).astype(np.float32)
         self.predicted_frames += 1
+        self.blind_prediction_frames += 1
         if self._corners_intersect_frame(self.predicted_corners):
             self.offscreen_predicted_frames = 0
+            if (
+                self.blind_prediction_frames
+                > CORNER_TRACK_VISIBLE_BLIND_FRAMES
+            ):
+                self.clear()
+                return None
         else:
             self.offscreen_predicted_frames += 1
         if (
@@ -641,6 +646,7 @@ class TargetCornerTracker:
         self.predicted_corners = corrected_corners.copy()
         self.corner_velocity = velocity
         self.predicted_frames += 1
+        self.blind_prediction_frames = 0
         self.offscreen_predicted_frames = (
             0
             if self._corners_intersect_frame(self.predicted_corners)
@@ -709,6 +715,7 @@ class TargetCornerTracker:
         self.corners = corrected_corners
         self.predicted_corners = corrected_corners.copy()
         self.offscreen_predicted_frames = 0
+        self.blind_prediction_frames = 0
         if self.previous_points is not None:
             self.previous_points = (
                 self.previous_points.astype(np.float32)
@@ -815,62 +822,12 @@ class TargetCornerTracker:
             if len(previous_valid) < CORNER_TRACK_MIN_FEATURES:
                 return self._tracking_failed(gray)
 
-            use_full_homography = (
-                self.frames_since_homography
-                >= CORNER_TRACK_HOMOGRAPHY_INTERVAL
-                or self.frames_since_homography == 0
+            homography, inlier_mask = cv2.findHomography(
+                previous_valid,
+                current_valid,
+                cv2.RANSAC,
+                3.0
             )
-            affine_accepted = False
-            if not use_full_homography:
-                affine, affine_mask = cv2.estimateAffinePartial2D(
-                    previous_valid,
-                    current_valid,
-                    method=cv2.RANSAC,
-                    ransacReprojThreshold=1.5
-                )
-                if affine is not None and affine_mask is not None:
-                    affine_inliers = affine_mask.reshape(-1) != 0
-                    if np.count_nonzero(affine_inliers) >= (
-                        CORNER_TRACK_MIN_FEATURES
-                    ):
-                        affine_points = cv2.transform(
-                            previous_valid[affine_inliers].reshape(
-                                -1,
-                                1,
-                                2
-                            ),
-                            affine
-                        ).reshape(-1, 2)
-                        residual = np.linalg.norm(
-                            affine_points
-                            - current_valid[affine_inliers],
-                            axis=1
-                        )
-                        affine_accepted = (
-                            np.median(residual)
-                            <= CORNER_TRACK_AFFINE_MAX_MEDIAN_RESIDUAL
-                            and np.max(residual)
-                            <= CORNER_TRACK_AFFINE_MAX_RESIDUAL
-                            and np.count_nonzero(affine_inliers)
-                            / len(previous_valid)
-                            >= 0.75
-                        )
-                        if affine_accepted:
-                            homography = np.eye(
-                                3,
-                                dtype=np.float32
-                            )
-                            homography[:2] = affine
-                            inlier_mask = affine_mask
-            if use_full_homography or not affine_accepted:
-                homography, inlier_mask = cv2.findHomography(
-                    previous_valid,
-                    current_valid,
-                    cv2.RANSAC,
-                    3.0
-                )
-                if homography is not None:
-                    self.frames_since_homography = 0
             if homography is None or inlier_mask is None:
                 return self._tracking_failed(gray)
 
@@ -1009,8 +966,8 @@ class TargetCornerTracker:
         self.predicted_corners = accepted_corners.copy()
         self.predicted_frames = 0
         self.offscreen_predicted_frames = 0
+        self.blind_prediction_frames = 0
         self.frames_since_detection += 1
-        self.frames_since_homography += 1
         self.failures = 0
         return accepted_corners.copy() / CORNER_TRACK_SCALE
 
@@ -1098,10 +1055,7 @@ def make_homography(corners):
     return H
 
 
-def rectify_image(
-    frame,
-    H
-):
+def rectify_image(frame, H):
     if (
         TARGET_ACCEL_USE_CPP_PERSPECTIVE
         and _NATIVE_BACKEND.is_available
