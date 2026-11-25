@@ -16,6 +16,7 @@ from common.config import (
     CORNER_TRACK_REFRESH_FEATURES,
     CORNER_TRACK_MAX_OFFSCREEN_FRAMES,
     CORNER_LOST_DETECT_INTERVAL,
+    CORNER_REDETECT_ROI_PADDING,
     CORNER_PREDICT_DETECT_INTERVAL,
     CORNER_TRACK_VISIBLE_BLIND_FRAMES,
     CORNER_TRACK_PREDICTION_VELOCITY_DECAY,
@@ -338,6 +339,52 @@ class TargetCornerTracker:
             return frame_index % CORNER_LOST_DETECT_INTERVAL == 0
         return self.frames_since_detection >= CORNER_DETECT_INTERVAL
 
+    def get_redetection_roi(
+        self,
+        frame_width,
+        frame_height,
+        center_anchor=None
+    ):
+        if self.corners is None:
+            return 0, 0, frame_width, frame_height
+
+        corners = self.corners / CORNER_TRACK_SCALE
+        if center_anchor is not None:
+            current_H = make_homography(corners)
+            current_center = target_frame_center_to_camera(current_H)
+            if current_center is not None:
+                corners = corners + (
+                    np.asarray(center_anchor, dtype=np.float32)
+                    - np.asarray(current_center, dtype=np.float32)
+                )
+        min_x = float(np.min(corners[:, 0]))
+        max_x = float(np.max(corners[:, 0]))
+        min_y = float(np.min(corners[:, 1]))
+        max_y = float(np.max(corners[:, 1]))
+        center_x = (min_x + max_x) * 0.5
+        center_y = (min_y + max_y) * 0.5
+        target_width = max_x - min_x
+        target_height = max_y - min_y
+        roi_width = min(
+            frame_width,
+            max(
+                TRACKING_ROI_MIN_WIDTH,
+                int(round(target_width * (1.0 + CORNER_REDETECT_ROI_PADDING)))
+            )
+        )
+        roi_height = min(
+            frame_height,
+            max(
+                TRACKING_ROI_MIN_HEIGHT,
+                int(round(target_height * (1.0 + CORNER_REDETECT_ROI_PADDING)))
+            )
+        )
+        x1 = int(round(center_x - roi_width * 0.5))
+        y1 = int(round(center_y - roi_height * 0.5))
+        x1 = max(0, min(frame_width - roi_width, x1))
+        y1 = max(0, min(frame_height - roi_height, y1))
+        return x1, y1, x1 + roi_width, y1 + roi_height
+
     def clear(self):
         self.previous_gray = None
         self.previous_points = None
@@ -389,22 +436,56 @@ class TargetCornerTracker:
         max_x = float(np.max(corners[:, 0]))
         min_y = float(np.min(corners[:, 1]))
         max_y = float(np.max(corners[:, 1]))
-        return not (
+        if (
             max_x < 0.0
             or min_x > self.track_width - 1
             or max_y < 0.0
             or min_y > self.track_height - 1
-        )
+        ):
+            return False
 
-    def initialize(self, frame, corners):
+        frame_polygon = np.asarray(
+            [
+                [0.0, 0.0],
+                [self.track_width - 1.0, 0.0],
+                [self.track_width - 1.0, self.track_height - 1.0],
+                [0.0, self.track_height - 1.0],
+            ],
+            dtype=np.float32
+        )
+        intersection_area, _ = cv2.intersectConvexConvex(
+            corners.astype(np.float32),
+            frame_polygon
+        )
+        return intersection_area > 0.0
+
+    def initialize(
+        self,
+        frame,
+        corners,
+        force=False,
+        center_anchor=None
+    ):
         gray = self._prepare_gray(frame)
         candidate_corners = (
             corners.astype(np.float32) * CORNER_TRACK_SCALE
         )
+        if force and center_anchor is not None:
+            anchor_small = (
+                np.asarray(center_anchor, dtype=np.float32)
+                * CORNER_TRACK_SCALE
+            )
+            inside_distance = cv2.pointPolygonTest(
+                candidate_corners.astype(np.float32),
+                (float(anchor_small[0]), float(anchor_small[1])),
+                True
+            )
+            if inside_distance < -12.0:
+                return None
         measured_velocity = None
         direct_motion = False
 
-        if self.corners is not None:
+        if self.corners is not None and not force:
             old_area = abs(cv2.contourArea(
                 self.corners.reshape(-1, 1, 2)
             ))
@@ -517,6 +598,18 @@ class TargetCornerTracker:
         if self.predicted_corners is None:
             return None
         if self.corner_velocity is not None:
+            visible_frame = self._corners_intersect_frame(
+                self.predicted_corners
+            )
+            if (
+                visible_frame
+                and self.blind_prediction_frames
+                >= CORNER_TRACK_VISIBLE_BLIND_FRAMES
+            ):
+                self.corner_velocity = np.zeros(
+                    (4, 2),
+                    dtype=np.float32
+                )
             self.corner_velocity = (
                 self.corner_velocity
                 * CORNER_TRACK_PREDICTION_VELOCITY_DECAY
@@ -528,12 +621,6 @@ class TargetCornerTracker:
         self.blind_prediction_frames += 1
         if self._corners_intersect_frame(self.predicted_corners):
             self.offscreen_predicted_frames = 0
-            if (
-                self.blind_prediction_frames
-                > CORNER_TRACK_VISIBLE_BLIND_FRAMES
-            ):
-                self.clear()
-                return None
         else:
             self.offscreen_predicted_frames += 1
         if (

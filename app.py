@@ -51,12 +51,15 @@ from common.config import (
     GIMBAL_TILT_KI,
     GIMBAL_TILT_KP,
     GIMBAL_TILT_LIMIT_DEG,
+    TARGET_LOCK_CONFIRM_FRAMES,
+    TARGET_LOSS_CONFIRM_FRAMES,
     TIMING_PRINT_INTERVAL,
     UART_SEND_INTERVAL,
 )
 
 from control.camera_attitude import CameraAttitude
 from common.console_output import print_status
+from common.target_lock import TargetLockHysteresis
 from control.gimbal_pid import TwoAxisGimbalPID
 from vision.kalman import TargetKalman
 from vision.lighting import update_fill_light
@@ -285,6 +288,10 @@ def main():
     frame_count = 0
     tracking_roi = (0, 0, CAMERA_WIDTH, CAMERA_HEIGHT)
     corner_tracker = TargetCornerTracker()
+    target_lock = TargetLockHysteresis(
+        lock_confirm_frames=TARGET_LOCK_CONFIRM_FRAMES,
+        loss_confirm_frames=TARGET_LOSS_CONFIRM_FRAMES
+    )
 
     print_status(
         "APP",
@@ -349,28 +356,50 @@ def main():
             if corner_tracker.is_predicted
             else None
         )
+        detect_roi = corner_tracker.get_redetection_roi(
+            CAMERA_WIDTH,
+            CAMERA_HEIGHT,
+            center_anchor=prediction_anchor
+        ) if corner_tracker.is_predicted else (
+            roi_x1,
+            roi_y1,
+            roi_x2,
+            roi_y2
+        )
+        detect_x1, detect_y1, detect_x2, detect_y2 = detect_roi
 
         if detect_corners:
-            roi_frame = frame[roi_y1:roi_y2, roi_x1:roi_x2]
+            roi_frame = frame[
+                detect_y1:detect_y2,
+                detect_x1:detect_x2
+            ]
             reference_corners = (
                 corner_tracker.corners.copy() / CORNER_TRACK_SCALE
-                if corner_tracker.corners is not None
+                if (
+                    corner_tracker.corners is not None
+                    and not corner_tracker.is_predicted
+                )
                 else None
             )
             if reference_corners is not None:
                 reference_corners = reference_corners.copy()
-                reference_corners[:, 0] -= roi_x1
-                reference_corners[:, 1] -= roi_y1
+                reference_corners[:, 0] -= detect_x1
+                reference_corners[:, 1] -= detect_y1
             corners, _ = detect_target_corners(
                 roi_frame,
                 reference_corners
             )
             if corners is not None:
-                corners[:, 0] += roi_x1
-                corners[:, 1] += roi_y1
+                corners[:, 0] += detect_x1
+                corners[:, 1] += detect_y1
 
         if corners is not None:
-            accepted_corners = corner_tracker.initialize(frame, corners)
+            accepted_corners = corner_tracker.initialize(
+                frame,
+                corners,
+                force=corner_tracker.is_predicted,
+                center_anchor=prediction_anchor
+            )
             if accepted_corners is not None:
                 corners = accepted_corners
             elif corner_tracker.is_active:
@@ -494,19 +523,38 @@ def main():
         target_status_color = (0, 0, 255)
         target_point = None
 
-        if center_camera is not None and fit_status == "OK":
-            stage_start = time.monotonic()
-            kalman.update(
-                center_camera,
-                dt
-            )
-            module_times["kalman"] += time.monotonic() - stage_start
+        measured_target_locked = (
+            center_camera is not None
+            and fit_status == "OK"
+        )
+        stable_target_locked, stable_target_point = target_lock.update(
+            measured_target_locked,
+            center_camera
+            if measured_target_locked
+            else None
+        )
+        serial_target_point = (
+            stable_target_point
+            if stable_target_locked
+            else None
+        )
 
-            # 成功拟合的靶心直接作为权威位置。
-            fx, fy = center_camera
+        if stable_target_locked and stable_target_point is not None:
+            if measured_target_locked:
+                stage_start = time.monotonic()
+                kalman.update(
+                    stable_target_point,
+                    dt
+                )
+                module_times["kalman"] += time.monotonic() - stage_start
             target_status = "TARGET LOCKED"
             target_status_color = (0, 255, 0)
-            target_point = (fx, fy)
+            target_point = stable_target_point
+
+        elif measured_target_locked:
+            target_status = "TARGET ACQUIRING"
+            target_status_color = (0, 165, 255)
+            target_point = center_camera
 
         elif center_camera is not None:
             target_status = (
@@ -633,7 +681,7 @@ def main():
         if now_uart - last_uart_send >= UART_SEND_INTERVAL:
             stage_start = time.monotonic()
             serial_sender.send_frame(
-                center_camera=center_camera
+                center_camera=serial_target_point
             )
             module_times["uart"] += time.monotonic() - stage_start
             last_uart_send = now_uart
