@@ -413,6 +413,10 @@ def main():
         if corners is None:
             corner_mode = "LOST"
             tracking_roi = (0, 0, CAMERA_WIDTH, CAMERA_HEIGHT)
+            if not corner_tracker.is_active:
+                cached_center_rectified = None
+                cached_fit_rms = None
+                cached_fit_status = "frame not found"
 
         center_camera = None
         center_rectified = None
@@ -440,8 +444,20 @@ def main():
             distant = target_area_ratio <= FAR_TARGET_AREA_RATIO
 
             if corner_tracker.is_predicted:
-                center_camera = target_frame_center_to_camera(H)
-                fit_status = "frame center fallback"
+                if (
+                    cached_center_rectified is not None
+                    and cached_fit_status == "OK"
+                ):
+                    center_rectified = cached_center_rectified
+                    fit_rms = cached_fit_rms
+                    fit_status = "predicted cached center"
+                    center_camera = rectified_to_camera(
+                        center_rectified,
+                        H
+                    )
+                else:
+                    center_camera = target_frame_center_to_camera(H)
+                    fit_status = "frame center fallback"
             else:
                 refresh_center = (
                     cached_center_rectified is None
@@ -526,7 +542,12 @@ def main():
         target_status_color = (0, 0, 255)
         target_point = None
 
-        if center_camera is not None and fit_status == "OK":
+        if corner_tracker.is_predicted and center_camera is not None:
+            target_status = "PREDICTING"
+            target_status_color = (0, 165, 255)
+            target_point = (center_camera[0], center_camera[1])
+
+        elif center_camera is not None and fit_status == "OK":
             stage_start = time.monotonic()
             kalman.update(
                 center_camera,

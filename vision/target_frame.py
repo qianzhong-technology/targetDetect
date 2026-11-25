@@ -20,7 +20,6 @@ from common.config import (
     CORNER_TRACK_MAX_OFFSCREEN_FRAMES,
     CORNER_LOST_DETECT_INTERVAL,
     CORNER_PREDICT_DETECT_INTERVAL,
-    CORNER_TRACK_VISIBLE_BLIND_FRAMES,
     CORNER_TRACK_PREDICTION_VELOCITY_DECAY,
     CORNER_TRACK_CENTER_ANCHOR_MAX_CORRECTION_PX,
     CORNER_TRACK_MOTION_THRESHOLD_PX,
@@ -306,7 +305,6 @@ class TargetCornerTracker:
         self.corner_velocity: Optional[np.ndarray] = None
         self.predicted_frames = 0
         self.offscreen_predicted_frames = 0
-        self.blind_prediction_frames = 0
         self.track_width: Optional[int] = None
         self.track_height: Optional[int] = None
         self.pending_corners: Optional[np.ndarray] = None
@@ -350,7 +348,6 @@ class TargetCornerTracker:
         self.corner_velocity = None
         self.predicted_frames = 0
         self.offscreen_predicted_frames = 0
-        self.blind_prediction_frames = 0
         self.track_width = None
         self.track_height = None
         self.pending_corners = None
@@ -509,7 +506,6 @@ class TargetCornerTracker:
             self.corner_velocity = np.zeros((4, 2), dtype=np.float32)
         self.predicted_frames = 0
         self.offscreen_predicted_frames = 0
-        self.blind_prediction_frames = 0
         self.track_width = gray.shape[1]
         self.track_height = gray.shape[0]
         self.previous_gray = gray
@@ -531,15 +527,8 @@ class TargetCornerTracker:
                 self.predicted_corners + self.corner_velocity
             ).astype(np.float32)
         self.predicted_frames += 1
-        self.blind_prediction_frames += 1
         if self._corners_intersect_frame(self.predicted_corners):
             self.offscreen_predicted_frames = 0
-            if (
-                self.blind_prediction_frames
-                > CORNER_TRACK_VISIBLE_BLIND_FRAMES
-            ):
-                self.clear()
-                return None
         else:
             self.offscreen_predicted_frames += 1
         if (
@@ -652,7 +641,6 @@ class TargetCornerTracker:
         self.predicted_corners = corrected_corners.copy()
         self.corner_velocity = velocity
         self.predicted_frames += 1
-        self.blind_prediction_frames = 0
         self.offscreen_predicted_frames = (
             0
             if self._corners_intersect_frame(self.predicted_corners)
@@ -721,7 +709,6 @@ class TargetCornerTracker:
         self.corners = corrected_corners
         self.predicted_corners = corrected_corners.copy()
         self.offscreen_predicted_frames = 0
-        self.blind_prediction_frames = 0
         if self.previous_points is not None:
             self.previous_points = (
                 self.previous_points.astype(np.float32)
@@ -1022,7 +1009,6 @@ class TargetCornerTracker:
         self.predicted_corners = accepted_corners.copy()
         self.predicted_frames = 0
         self.offscreen_predicted_frames = 0
-        self.blind_prediction_frames = 0
         self.frames_since_detection += 1
         self.frames_since_homography += 1
         self.failures = 0
