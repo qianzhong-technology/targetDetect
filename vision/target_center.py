@@ -715,6 +715,13 @@ def fit_target_center(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
         ellipse = cv2.fitEllipse(contour)
         (cx, cy), (axis_a, axis_b), _ = ellipse
         radius = (axis_a + axis_b) / 4.0
+        axis_ratio = (
+            max(axis_a, axis_b) / min(axis_a, axis_b)
+            if min(axis_a, axis_b) > 0
+            else 999.0
+        )
+        if axis_ratio > 1.35:
+            continue
         ring_index = min(
             range(len(RING_RADII_PX)),
             key=lambda index: abs(radius - expected_radii[index])
@@ -761,7 +768,7 @@ def fit_target_center(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
         for ring_index, ring_candidates in enumerate(candidates)
         if ring_candidates
     ]
-    if len(selected) < 3:
+    if len(selected) < 4:
         return _fit_target_center_pixels(mask, scale_x, scale_y)
 
     center_array = np.median(
@@ -782,6 +789,27 @@ def fit_target_center(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
         return None, None, None, "joint circle fit failed"
     center_local = joint_fit[:2]
     fitted_radii = joint_fit[2]
+    if len(fitted_radii) >= 2:
+        for previous_radius, next_radius in zip(
+            fitted_radii,
+            fitted_radii[1:]
+        ):
+            spacing = next_radius - previous_radius
+            if (
+                spacing < 12.0 * scale
+                or abs(spacing - 20.0 * scale)
+                > MAX_RADIUS_ERROR * scale
+            ):
+                return _fit_target_center_pixels(mask, scale_x, scale_y)
+    joint_center_spread = max(
+        np.linalg.norm(
+            np.asarray(item[1][1], dtype=np.float64)
+            - np.asarray(center_local, dtype=np.float64)
+        )
+        for item in selected
+    ) / scale
+    if joint_center_spread > max(8.0, RING_SEARCH_TOLERANCE):
+        return _fit_target_center_pixels(mask, scale_x, scale_y)
     expected_selected_radii = [
         expected_radii[item[0]]
         for item in selected

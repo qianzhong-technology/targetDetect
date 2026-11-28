@@ -68,6 +68,45 @@ class TargetGeometryTests(unittest.TestCase):
         self.assertLess(rms, 5.0)
         self.assertEqual(fit_status, "OK")
 
+    def test_random_red_shapes_do_not_create_a_target_lock(self):
+        rng = np.random.default_rng(12)
+        rectified = np.full((297, 210, 3), 255, dtype=np.uint8)
+        for _ in range(60):
+            x = int(rng.integers(15, 195))
+            y = int(rng.integers(15, 282))
+            radius = int(rng.integers(4, 15))
+            cv2.circle(
+                rectified,
+                (x, y),
+                radius,
+                (0, 0, 255),
+                -1
+            )
+
+        center, rms, _, _, fit_status, _ = detect_target_center(rectified)
+        self.assertTrue(
+            center is None
+            or fit_status != "OK"
+            or rms is None
+            or rms > 5.0
+        )
+
+    def test_subpixel_frame_refinement_improves_corner_location(self):
+        frame = np.full((480, 640, 3), 245, dtype=np.uint8)
+        cv2.rectangle(frame, (170, 70), (470, 395), (0, 0, 0), 8)
+        corners, _ = detect_target_corners(frame)
+        self.assertIsNotNone(corners)
+        expected = np.asarray(
+            [
+                [170.0, 70.0],
+                [470.0, 70.0],
+                [470.0, 395.0],
+                [170.0, 395.0],
+            ],
+            dtype=np.float32
+        )
+        np.testing.assert_allclose(corners, expected, atol=8.0)
+
 
 class TargetLockTests(unittest.TestCase):
     def test_large_jump_is_not_immediately_accepted_as_a_new_lock(self):
