@@ -33,6 +33,8 @@ from common.config import (
     FRAME_CLOSE_KERNEL,
     FRAME_ASPECT_TOLERANCE,
     FRAME_ASPECT_WIDE_TOLERANCE,
+    FRAME_EDGE_FIT_SAMPLES,
+    FRAME_EDGE_FIT_STRIP_PX,
     FRAME_DETECT_SCALE,
     FRAME_MIN_AREA_RATIO,
     FRAME_HSV_HIGH,
@@ -246,12 +248,8 @@ def _quadrilateral_border_quality(mask, quad):
 
 def _fit_quad_edge_lines(mask, quad):
     """根据实际黑色边缘像素重新拟合四条边，并用亚像素线交点修正角点。"""
-    ys, xs = np.nonzero(mask)
-    if len(xs) < 20:
-        return None
-
-    points = np.column_stack((xs, ys)).astype(np.float32)
     lines = []
+    height, width = mask.shape[:2]
 
     for index in range(4):
         point_a = quad[index]
@@ -266,27 +264,47 @@ def _fit_quad_edge_lines(mask, quad):
             [-edge_unit[1], edge_unit[0]],
             dtype=np.float32
         )
-        offset = points - point_a
-        perpendicular_distance = np.abs(
-            offset @ normal
+        sample_count = min(
+            FRAME_EDGE_FIT_SAMPLES,
+            max(12, int(round(edge_length / 3.0)))
         )
-        along_edge = offset @ edge_unit
-        strip_width = max(
-            2.0,
-            min(5.0, edge_length * 0.025)
+        strip_width = min(
+            5.0,
+            max(FRAME_EDGE_FIT_STRIP_PX, edge_length * 0.015)
         )
-        selected = (
-            (perpendicular_distance <= strip_width)
-            & (along_edge >= -strip_width)
-            & (along_edge <= edge_length + strip_width)
+        line_points = []
+        strip_offsets = np.linspace(
+            -strip_width,
+            strip_width,
+            5
         )
-        line_points = points[selected]
-        if len(line_points) < max(6, int(edge_length * 0.10)):
+        for sample_index in range(sample_count):
+            ratio = sample_index / float(max(1, sample_count - 1))
+            edge_point = point_a + edge * ratio
+            for perpendicular_offset in strip_offsets:
+                sample = (
+                    edge_point
+                    + normal * float(perpendicular_offset)
+                )
+                sx = int(round(float(sample[0])))
+                sy = int(round(float(sample[1])))
+                if (
+                    0 <= sx < width
+                    and 0 <= sy < height
+                    and mask[sy, sx] != 0
+                ):
+                    line_points.append((sx, sy))
+
+        if len(line_points) < max(6, int(edge_length * 0.08)):
             return None
+        line_point_array = np.asarray(
+            line_points,
+            dtype=np.float32
+        ).reshape(-1, 1, 2)
 
         try:
             vx, vy, x0, y0 = cv2.fitLine(
-                line_points.astype(np.float32).reshape(-1, 1, 2),
+                line_point_array,
                 cv2.DIST_L2,
                 0,
                 0.01,
@@ -440,9 +458,6 @@ def detect_target_corners(frame, reference_corners=None):
 
                 if len(approx) == 4 and cv2.isContourConvex(approx):
                     quad = order_points(approx.reshape(4, 2))
-                    refined_quad = _fit_quad_edge_lines(mask, quad)
-                    if refined_quad is not None:
-                        quad = refined_quad
                     quad_area = abs(
                         cv2.contourArea(
                             quad.astype(np.float32).reshape(-1, 1, 2)
@@ -469,7 +484,41 @@ def detect_target_corners(frame, reference_corners=None):
                             ))
                     break
 
-        return candidates, mask
+        candidates = _deduplicate_frame_candidates(candidates)
+        candidates.sort(
+            key=lambda item: item[0],
+            reverse=True
+        )
+        refined_candidates = []
+        for candidate_index, (score, quad) in enumerate(candidates):
+            if candidate_index >= 1:
+                refined_candidates.append((score, quad))
+                continue
+            refined_quad = _fit_quad_edge_lines(mask, quad)
+            if refined_quad is not None:
+                quad = refined_quad
+                quad_area = abs(
+                    cv2.contourArea(
+                        quad.astype(np.float32).reshape(-1, 1, 2)
+                    )
+                )
+                edge_ratio, inner_ratio, interior_ratio, quality = (
+                    _quadrilateral_border_quality(mask, quad)
+                )
+                if (
+                    edge_ratio >= 0.38
+                    and inner_ratio <= 0.72
+                    and quality >= -0.05
+                    and _matches_target_aspect(quad)
+                ):
+                    score = (
+                        1000.0 * quality
+                        + quad_area / float(image_area) * 120.0
+                        - interior_ratio * 25.0
+                    )
+            refined_candidates.append((score, quad))
+
+        return refined_candidates, mask
 
     candidates, black_mask = find_candidates(hsv_mask)
     candidates = _deduplicate_frame_candidates(candidates)
