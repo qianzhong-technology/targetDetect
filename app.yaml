@@ -8,6 +8,7 @@ files:
   - common\__init__.py
   - common\config.py
   - common\console_output.py
+  - common\target_lock.py
   - control\__init__.py
   - control\camera_attitude.py
   - control\gimbal_pid.py

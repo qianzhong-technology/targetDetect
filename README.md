@@ -35,6 +35,7 @@
   - [5.9 `control/gimbal_pid.py`](#59-controlgimbal_pidpy)
     - [IMU 姿态反馈](#imu-姿态反馈)
   - [5.10 `control/camera_attitude.py`](#510-controlcamera_attitudepy)
+  - [5.11 `common/target_lock.py`](#511-commontarget_lockpy)
 - [6. 坐标系统](#6-坐标系统)
 - [7. 状态机](#7-状态机)
   - [靶纸框状态](#靶纸框状态)
@@ -91,6 +92,7 @@
 | `control/gimbal_pid.py` | 二轴云台闭环 PID、积分限幅、输出限幅及转动方向打印 |
 | `control/camera_attitude.py` | MaixCAM-Pro QMI8658 姿态读取、陀螺仪校准和 AHRS 欧拉角反馈 |
 | `common/console_output.py` | 统一控制台状态日志格式 |
+| `common/target_lock.py` | 基于确认帧、丢失帧和异常跳变的目标锁定状态辅助 |
 | `vision/native/targetdetect_accel.cpp` | C++/NEON 加速实现（LK、透视、圆环拟合） |
 | `vision/native/build_with_maixcdk.sh` | MaixCDK 一键编译并同步 `.so`/`dl_lib` |
 | `vision/native/maixcdk_project/` | MaixCDK 编译工程（组件化） |
@@ -270,7 +272,7 @@
 3. 右下
 4. 左下
 
-排序依赖角度和四角到中心的几何关系，而不是依赖固定像素位置。
+排序使用四角坐标的和与差：最小 `x+y` 为左上角，最大 `x+y` 为右下角，最大 `x-y` 为右上角，最小 `x-y` 为左下角。
 
 #### 靶纸框重检
 
@@ -285,7 +287,7 @@
 7. HSV 检测失败时尝试灰度 Otsu 检测。
 8. 若存在上一参考框，只选择面积、中心和角点位置一致的候选。
 9. 验证候选外边的黑色覆盖和内部洁净度，避免复杂背景中的暗块被误识别为靶纸。
-10. 对通过几何筛选的候选分别拟合四条边，并使用边缘线交点修正角点；重复轮廓候选会去重。
+10. 重复轮廓候选会去重；最高分候选再拟合四条边，并使用边缘线交点修正角点。
 11. 亚像素边拟合只用于最高分候选，每条边最多采样 17 个位置和 5 个法向偏移，避免为多个候选重复进行全图像素搜索。
 
 长宽比筛选只排除与靶纸比例明显不符的矩形；倾斜拍摄时允许更大的比例变化。候选框仍需通过靶心红环几何验证，才会报告靶心。
@@ -573,6 +575,18 @@ red_excess = red - max(green, blue)
 4. 根据相机安装方向调整 `GIMBAL_IMU_PAN_AXIS`、`GIMBAL_IMU_TILT_AXIS` 和符号。
 5. 舵机出现方向反转时只修改方向配置，不修改视觉靶心坐标。
 
+### 5.11 `common/target_lock.py`
+
+该模块负责在主状态机之外维持目标锁定状态：
+
+- 高置信测量连续达到 `TARGET_LOCK_CONFIRM_FRAMES` 后进入锁定。
+- 锁定后低置信或丢失连续达到 `TARGET_LOSS_CONFIRM_FRAMES` 后解除锁定。
+- 锁定坐标与新测量之间超过 40 px 时不立即接管，避免外框或圆环产生的大跳变污染输出。
+- 正常锁定中的坐标使用平滑系数接近新测量，不替代外框与靶心算法本身。
+- 尚未锁定时无测量返回，不输出可发送的稳定靶心。
+
+目标锁定状态主要保护串口和云台状态切换，算法侧仍以外框几何、红环一致性和角点跟踪为主要可靠性来源。
+
 ## 6. 坐标系统
 
 项目有三套坐标：
@@ -740,6 +754,7 @@ red_excess = red - max(green, blue)
 - `main.py`
 - `app.py`
 - `common/config.py`
+- `common/target_lock.py`
 - `vision/lighting.py`
 - `vision/target_frame.py`
 - `vision/target_center.py`
