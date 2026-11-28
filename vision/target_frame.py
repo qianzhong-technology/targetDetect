@@ -33,6 +33,8 @@ from common.config import (
     FRAME_CLOSE_KERNEL,
     FRAME_ASPECT_TOLERANCE,
     FRAME_ASPECT_WIDE_TOLERANCE,
+    FRAME_EDGE_FIT_SAMPLES,
+    FRAME_EDGE_FIT_STRIP_PX,
     FRAME_DETECT_SCALE,
     FRAME_MIN_AREA_RATIO,
     FRAME_HSV_HIGH,
@@ -94,6 +96,20 @@ def _matches_target_aspect(corners):
         np.roll(corners, -1, axis=0) - corners,
         axis=1
     )
+    opposite_width = min(edges[0], edges[2])
+    opposite_width_max = max(edges[0], edges[2])
+    opposite_height = min(edges[1], edges[3])
+    opposite_height_max = max(edges[1], edges[3])
+    if (
+        opposite_width_max <= 0
+        or opposite_height_max <= 0
+    ):
+        return False
+    if (
+        opposite_width / opposite_width_max < 0.45
+        or opposite_height / opposite_height_max < 0.45
+    ):
+        return False
     average_width = (edges[0] + edges[2]) / 2.0
     average_height = (edges[1] + edges[3]) / 2.0
     if average_width <= 0 or average_height <= 0:
@@ -113,6 +129,47 @@ def _matches_target_aspect(corners):
         <= aspect_error
         <= FRAME_ASPECT_WIDE_TOLERANCE
     )
+
+
+def _deduplicate_frame_candidates(candidates, pixel_tolerance=6.0):
+    """合并同一黑框在多层轮廓和多 epsilon 下的重复候选。"""
+    candidates = sorted(
+        candidates,
+        key=lambda item: item[0],
+        reverse=True
+    )
+    kept = []
+    for score, quad in candidates:
+        duplicate = False
+        for _, kept_quad in kept:
+            center_shift = float(np.linalg.norm(
+                np.mean(quad, axis=0)
+                - np.mean(kept_quad, axis=0)
+            ))
+            corner_shift = float(np.max(
+                np.linalg.norm(quad - kept_quad, axis=1)
+            ))
+            area = abs(cv2.contourArea(
+                quad.astype(np.float32).reshape(-1, 1, 2)
+            ))
+            kept_area = abs(cv2.contourArea(
+                kept_quad.astype(np.float32).reshape(-1, 1, 2)
+            ))
+            area_ratio = (
+                area / kept_area
+                if kept_area > 0
+                else 0.0
+            )
+            if (
+                center_shift <= pixel_tolerance
+                and corner_shift <= pixel_tolerance * 2.0
+                and 0.75 <= area_ratio <= 1.33
+            ):
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append((score, quad))
+    return kept
 
 
 def _quadrilateral_border_quality(mask, quad):
@@ -187,6 +244,140 @@ def _quadrilateral_border_quality(mask, quad):
 
     quality = edge_ratio - 0.45 * inner_ratio - 0.15 * interior_ratio
     return float(edge_ratio), float(inner_ratio), float(interior_ratio), float(quality)
+
+
+def _fit_quad_edge_lines(mask, quad):
+    """根据实际黑色边缘像素重新拟合四条边，并用亚像素线交点修正角点。"""
+    lines = []
+    height, width = mask.shape[:2]
+
+    for index in range(4):
+        point_a = quad[index]
+        point_b = quad[(index + 1) % 4]
+        edge = point_b - point_a
+        edge_length = float(np.linalg.norm(edge))
+        if edge_length < 1.0:
+            return None
+
+        edge_unit = edge / edge_length
+        normal = np.asarray(
+            [-edge_unit[1], edge_unit[0]],
+            dtype=np.float32
+        )
+        sample_count = min(
+            FRAME_EDGE_FIT_SAMPLES,
+            max(12, int(round(edge_length / 3.0)))
+        )
+        strip_width = min(
+            5.0,
+            max(FRAME_EDGE_FIT_STRIP_PX, edge_length * 0.015)
+        )
+        line_points = []
+        strip_offsets = np.linspace(
+            -strip_width,
+            strip_width,
+            5
+        )
+        for sample_index in range(sample_count):
+            ratio = sample_index / float(max(1, sample_count - 1))
+            edge_point = point_a + edge * ratio
+            for perpendicular_offset in strip_offsets:
+                sample = (
+                    edge_point
+                    + normal * float(perpendicular_offset)
+                )
+                sx = int(round(float(sample[0])))
+                sy = int(round(float(sample[1])))
+                if (
+                    0 <= sx < width
+                    and 0 <= sy < height
+                    and mask[sy, sx] != 0
+                ):
+                    line_points.append((sx, sy))
+
+        if len(line_points) < max(6, int(edge_length * 0.08)):
+            return None
+        line_point_array = np.asarray(
+            line_points,
+            dtype=np.float32
+        ).reshape(-1, 1, 2)
+
+        try:
+            vx, vy, x0, y0 = cv2.fitLine(
+                line_point_array,
+                cv2.DIST_L2,
+                0,
+                0.01,
+                0.01
+            ).reshape(-1)
+        except cv2.error:
+            return None
+
+        line_vector = np.asarray([vx, vy], dtype=np.float32)
+        line_vector_length = float(np.linalg.norm(line_vector))
+        if line_vector_length <= 0:
+            return None
+        line_vector /= line_vector_length
+        line_point = np.asarray([x0, y0], dtype=np.float32)
+        line_normal = np.asarray(
+            [-line_vector[1], line_vector[0]],
+            dtype=np.float32
+        )
+        line_a = float(line_normal[0])
+        line_b = float(line_normal[1])
+        line_c = -float(line_normal @ line_point)
+        lines.append((line_a, line_b, line_c))
+
+    refined = np.zeros((4, 2), dtype=np.float32)
+    for index in range(4):
+        line_a, line_b, line_c = lines[index]
+        next_a, next_b, next_c = lines[(index + 1) % 4]
+        denominator = (
+            line_a * next_b
+            - next_a * line_b
+        )
+        if abs(denominator) < 1e-4:
+            return None
+        x = (
+            line_b * next_c
+            - next_b * line_c
+        ) / denominator
+        y = (
+            next_a * line_c
+            - line_a * next_c
+        ) / denominator
+        refined[index] = (x, y)
+
+    refined = order_points(refined)
+    if (
+        not np.isfinite(refined).all()
+        or not cv2.isContourConvex(
+            refined.astype(np.float32).reshape(-1, 1, 2)
+        )
+    ):
+        return None
+
+    original_area = abs(cv2.contourArea(
+        quad.astype(np.float32).reshape(-1, 1, 2)
+    ))
+    refined_area = abs(cv2.contourArea(
+        refined.reshape(-1, 1, 2)
+    ))
+    area_ratio = (
+        refined_area / original_area
+        if original_area > 0
+        else 0.0
+    )
+    if not 0.75 <= area_ratio <= 1.25:
+        return None
+
+    corner_shift = float(np.max(
+        np.linalg.norm(refined - quad, axis=1)
+    ))
+    if corner_shift > max(25.0, math.sqrt(original_area) * 0.12):
+        return None
+
+    return refined
 
 
 def detect_target_corners(frame, reference_corners=None):
@@ -293,9 +484,44 @@ def detect_target_corners(frame, reference_corners=None):
                             ))
                     break
 
-        return candidates, mask
+        candidates = _deduplicate_frame_candidates(candidates)
+        candidates.sort(
+            key=lambda item: item[0],
+            reverse=True
+        )
+        refined_candidates = []
+        for candidate_index, (score, quad) in enumerate(candidates):
+            if candidate_index >= 1:
+                refined_candidates.append((score, quad))
+                continue
+            refined_quad = _fit_quad_edge_lines(mask, quad)
+            if refined_quad is not None:
+                quad = refined_quad
+                quad_area = abs(
+                    cv2.contourArea(
+                        quad.astype(np.float32).reshape(-1, 1, 2)
+                    )
+                )
+                edge_ratio, inner_ratio, interior_ratio, quality = (
+                    _quadrilateral_border_quality(mask, quad)
+                )
+                if (
+                    edge_ratio >= 0.38
+                    and inner_ratio <= 0.72
+                    and quality >= -0.05
+                    and _matches_target_aspect(quad)
+                ):
+                    score = (
+                        1000.0 * quality
+                        + quad_area / float(image_area) * 120.0
+                        - interior_ratio * 25.0
+                    )
+            refined_candidates.append((score, quad))
+
+        return refined_candidates, mask
 
     candidates, black_mask = find_candidates(hsv_mask)
+    candidates = _deduplicate_frame_candidates(candidates)
 
     if not candidates:
         gray = cv2.cvtColor(
@@ -315,6 +541,7 @@ def detect_target_corners(frame, reference_corners=None):
             cv2.THRESH_BINARY_INV
         )
         candidates, black_mask = find_candidates(otsu_mask)
+        candidates = _deduplicate_frame_candidates(candidates)
 
     if not candidates:
         return None, black_mask
