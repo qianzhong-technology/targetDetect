@@ -173,12 +173,12 @@
 
 | 参数 | 含义 |
 |---|---|
-| `FRAME_DETECT_SCALE` | 靶纸重检时的缩放比例 |
+| `FRAME_DETECT_SCALE` | 靶纸重检时的缩放比例，默认 50% |
 | `FRAME_MIN_AREA_RATIO` | 候选框允许占画面的最小面积比例 |
 | `FRAME_ASPECT_TOLERANCE` | 候选框相对 A4 长宽比的基础误差，默认 25% |
 | `FRAME_ASPECT_WIDE_TOLERANCE` | 横向透视过宽时允许的最大误差，默认 28% |
 | `FAR_TARGET_AREA_RATIO` | 小于此比例时启用远距低反差圆环重试 |
-| `FRAME_HSV_LOW/HIGH` | 黑色靶框的 HSV 范围 |
+| `FRAME_HSV_LOW/HIGH` | 黑色靶框的 HSV 范围（低亮度，不依赖色相） |
 | `FRAME_CLOSE_KERNEL` | 黑色掩膜形态学闭运算核 |
 
 远距离靶纸通常面积较小，可通过 `FRAME_MIN_AREA_RATIO` 降低面积门槛。默认为 1%，同时保留边界、凸四边形和 A4 长宽比约束。
@@ -276,7 +276,7 @@
 
 `detect_target_corners()`：
 
-1. 将输入按 `FRAME_DETECT_SCALE` 缩放（默认约 30% 分辨率）。
+1. 将输入按 `FRAME_DETECT_SCALE` 缩放（默认约 50% 分辨率）。
 2. 使用黑色 HSV 阈值提取掩膜。
 3. 闭运算并查找轮廓。
 4. 排除边界轮廓和面积小于 `FRAME_MIN_AREA_RATIO` 的轮廓。
@@ -284,6 +284,7 @@
 6. 拒绝长宽比与 A4 纸差异超过 25% 的候选。
 7. HSV 检测失败时尝试灰度 Otsu 检测。
 8. 若存在上一参考框，只选择面积、中心和角点位置一致的候选。
+9. 验证候选外边的黑色覆盖和内部洁净度，避免复杂背景中的暗块被误识别为靶纸。
 
 长宽比筛选只排除与靶纸比例明显不符的矩形；倾斜拍摄时允许更大的比例变化。候选框仍需通过靶心红环几何验证，才会报告靶心。
 
@@ -291,7 +292,7 @@
 
 `TargetCornerTracker` 使用金字塔 Lucas-Kanade 光流：
 
-1. 靶框四角内提取最多 24 个 `goodFeaturesToTrack` 特征。
+1. 优先在靶框四条边附近提取最多 24 个 `goodFeaturesToTrack` 特征，边特征不足时回退到框内特征。
 2. 将特征从上一帧灰度图跟踪到当前灰度图。
 3. 使用 RANSAC 计算特征前后对应关系的单应矩阵。
 4. 内点比例低于 75%时拒绝该帧跟踪。

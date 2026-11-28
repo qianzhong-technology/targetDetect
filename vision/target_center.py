@@ -573,6 +573,20 @@ def _fit_target_center_pixels(mask, scale_x=1.0, scale_y=1.0) -> Tuple[
         )
         center = (float(center_array[0]), float(center_array[1]))
 
+        ring_center_spread = max(
+            np.linalg.norm(
+                np.asarray(ring_center, dtype=np.float64)
+                - center_array
+            )
+            for ring_center in ring_centers
+        )
+        if ring_center_spread > max(
+            8.0,
+            RING_SEARCH_TOLERANCE
+        ):
+            failure_reason = "ring centers inconsistent"
+            continue
+
         if not check_angular_coverage(groups, center):
             failure_reason = "poor ring coverage"
             continue
