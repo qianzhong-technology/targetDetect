@@ -66,30 +66,27 @@ def order_points(pts):
     返回 shape=(4,2) 的 float32 数组。
     """
 
-    pts = np.array(pts, dtype=np.float32)
+    pts = np.array(pts, dtype=np.float32).reshape(4, 2)
+    if not np.isfinite(pts).all():
+        return pts
 
-    center = np.mean(pts, axis=0)
+    sums = pts[:, 0] + pts[:, 1]
+    diffs = pts[:, 0] - pts[:, 1]
+    tl_index = int(np.argmin(sums))
+    br_index = int(np.argmax(sums))
+    tr_index = int(np.argmax(diffs))
+    bl_index = int(np.argmin(diffs))
 
-    angles = np.arctan2(
-        pts[:, 1] - center[1],
-        pts[:, 0] - center[0]
+    ordered = np.asarray(
+        [
+            pts[tl_index],
+            pts[tr_index],
+            pts[br_index],
+            pts[bl_index],
+        ],
+        dtype=np.float32
     )
-
-    # 按绕中心的角度排序
-    ordered = pts[np.argsort(angles)]
-
-    # 找到最接近左上角的点作为起点
-    start_index = np.argmin(
-        ordered[:, 0] + ordered[:, 1]
-    )
-
-    ordered = np.roll(
-        ordered,
-        -start_index,
-        axis=0
-    )
-
-    return ordered.astype(np.float32)
+    return ordered
 
 
 def _matches_target_aspect(corners):
@@ -116,6 +113,80 @@ def _matches_target_aspect(corners):
         <= aspect_error
         <= FRAME_ASPECT_WIDE_TOLERANCE
     )
+
+
+def _quadrilateral_border_quality(mask, quad):
+    """检查候选四边形是否真的具有黑色外边和较干净的内部。"""
+    height, width = mask.shape[:2]
+    quad = np.asarray(quad, dtype=np.float32).reshape(4, 2)
+    center = np.mean(quad, axis=0)
+
+    edge_samples = 0
+    edge_dark = 0
+    inner_samples = 0
+    inner_dark = 0
+
+    for index in range(4):
+        point_a = quad[index]
+        point_b = quad[(index + 1) % 4]
+        edge = point_b - point_a
+        edge_length = float(np.linalg.norm(edge))
+        if edge_length < 1.0:
+            continue
+        midpoint = (point_a + point_b) * 0.5
+        inward = center - midpoint
+        inward_length = float(np.linalg.norm(inward))
+        if inward_length < 1.0:
+            continue
+        inward /= inward_length
+        perpendicular = np.asarray(
+            [-edge[1] / edge_length, edge[0] / edge_length],
+            dtype=np.float32
+        )
+        for sample_index in range(17):
+            ratio = sample_index / 16.0
+            point = point_a + edge * ratio
+            for offset in (-2.0, 0.0, 2.0):
+                sample = point + perpendicular * offset
+                sx = int(round(float(sample[0])))
+                sy = int(round(float(sample[1])))
+                if 0 <= sx < width and 0 <= sy < height:
+                    edge_samples += 1
+                    edge_dark += int(mask[sy, sx] != 0)
+
+            inner_point = point + inward * 7.0
+            for offset in (-1.0, 0.0, 1.0):
+                sample = inner_point + perpendicular * offset
+                sx = int(round(float(sample[0])))
+                sy = int(round(float(sample[1])))
+                if 0 <= sx < width and 0 <= sy < height:
+                    inner_samples += 1
+                    inner_dark += int(mask[sy, sx] != 0)
+
+    edge_ratio = (
+        float(edge_dark) / float(edge_samples)
+        if edge_samples > 0
+        else 0.0
+    )
+    inner_ratio = (
+        float(inner_dark) / float(inner_samples)
+        if inner_samples > 0
+        else 1.0
+    )
+    interior_mask = np.zeros(mask.shape, dtype=np.uint8)
+    cv2.fillConvexPoly(
+        interior_mask,
+        np.round(quad).astype(np.int32),
+        255
+    )
+    interior_pixels = cv2.bitwise_and(mask, interior_mask)
+    interior_ratio = (
+        float(cv2.countNonZero(interior_pixels))
+        / float(max(1, cv2.countNonZero(interior_mask)))
+    )
+
+    quality = edge_ratio - 0.45 * inner_ratio - 0.15 * interior_ratio
+    return float(edge_ratio), float(inner_ratio), float(interior_ratio), float(quality)
 
 
 def detect_target_corners(frame, reference_corners=None):
@@ -206,7 +277,20 @@ def detect_target_corners(frame, reference_corners=None):
                         quad_area >= image_area * FRAME_MIN_AREA_RATIO
                         and _matches_target_aspect(quad)
                     ):
-                        candidates.append((quad_area, quad))
+                        edge_ratio, inner_ratio, interior_ratio, quality = (
+                            _quadrilateral_border_quality(mask, quad)
+                        )
+                        if (
+                            edge_ratio >= 0.38
+                            and inner_ratio <= 0.72
+                            and quality >= -0.05
+                        ):
+                            candidates.append((
+                                1000.0 * quality
+                                + quad_area / float(image_area) * 120.0
+                                - interior_ratio * 25.0,
+                                quad,
+                            ))
                     break
 
         return candidates, mask
@@ -405,15 +489,39 @@ class TargetCornerTracker:
     def _find_features(gray, corners):
         mask = np.zeros(gray.shape, dtype=np.uint8)
         polygon = np.round(corners).astype(np.int32)
-        cv2.fillConvexPoly(mask, polygon, 255)
+        frame_diagonal = float(np.sqrt(
+            gray.shape[0] * gray.shape[0]
+            + gray.shape[1] * gray.shape[1]
+        ))
+        border_thickness = max(
+            3,
+            int(round(frame_diagonal * 0.012))
+        )
+        cv2.polylines(
+            mask,
+            [polygon],
+            True,
+            255,
+            border_thickness
+        )
         points = cv2.goodFeaturesToTrack(
             gray,
             maxCorners=CORNER_TRACK_MAX_FEATURES,
             qualityLevel=0.01,
-            minDistance=8,
+            minDistance=5,
             mask=mask,
             blockSize=5
         )
+        if points is None or len(points) < CORNER_TRACK_MIN_FEATURES:
+            cv2.fillConvexPoly(mask, polygon, 255)
+            points = cv2.goodFeaturesToTrack(
+                gray,
+                maxCorners=CORNER_TRACK_MAX_FEATURES,
+                qualityLevel=0.01,
+                minDistance=8,
+                mask=mask,
+                blockSize=5
+            )
         return points
 
     @staticmethod

@@ -25,15 +25,16 @@ RING_RADII_PX = [
     r * PIXELS_PER_MM for r in RING_RADII_MM
 ]
 
-FRAME_DETECT_SCALE = 0.30
+FRAME_DETECT_SCALE = 0.50
 FRAME_MIN_AREA_RATIO = 0.01
 FRAME_ASPECT_TOLERANCE = 0.25
 FRAME_ASPECT_WIDE_TOLERANCE = 0.28
 FAR_TARGET_AREA_RATIO = 0.08
 
-# 根据 H=221..253 度、S=71..100%、V=0..100% 转换得到。
-FRAME_HSV_LOW = np.array([110, 181, 0], dtype=np.uint8)
-FRAME_HSV_HIGH = np.array([127, 255, 255], dtype=np.uint8)
+# 黑色外框的 HSV 范围。黑色不依赖色相，只限制饱和度和亮度，
+# 避免继续误用只适合蓝色物体的旧范围。
+FRAME_HSV_LOW = np.array([0, 0, 0], dtype=np.uint8)
+FRAME_HSV_HIGH = np.array([180, 255, 100], dtype=np.uint8)
 
 # 黑色区域形态学处理核
 BLACK_KERNEL_SIZE = 7
